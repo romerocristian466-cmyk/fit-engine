@@ -39,12 +39,11 @@ if "nombre" not in st.session_state:
 
 if "historial" not in st.session_state:
     welcome_msg = "¡Hola! Bienvenido. Estoy aquí para acompañarte a ganar un día a la vez. Para empezar a conocernos, ¿cuál es tu nombre y cómo prefieres que te llame?"
-    st.session_state.historial = [{"role": "model", "content": welcome_msg}]
     try:
         audio_bytes = asyncio.run(voice_service.sintetizar_voz(welcome_msg, voz_id=st.session_state.voz_id))
-        st.session_state.initial_audio = audio_bytes
     except Exception:
-        st.session_state.initial_audio = None
+        audio_bytes = None
+    st.session_state.historial = [{"role": "model", "content": welcome_msg, "audio": audio_bytes}]
         
 if "last_audio" not in st.session_state:
     st.session_state.last_audio = None
@@ -53,15 +52,18 @@ if "played_initial_audio" not in st.session_state:
     st.session_state.played_initial_audio = False
 
 def procesar_respuesta(bot_reply):
-    st.session_state.historial.append({"role": "model", "content": bot_reply})
+    try:
+        audio_bytes = asyncio.run(voice_service.sintetizar_voz(bot_reply, voz_id=st.session_state.voz_id))
+    except Exception as e:
+        st.error("Error reproduciendo voz.")
+        audio_bytes = None
+        
+    st.session_state.historial.append({"role": "model", "content": bot_reply, "audio": audio_bytes})
+    
     with st.chat_message("assistant"):
         st.write(bot_reply)
-        # Generar y reproducir TTS
-        try:
-            audio_bytes = asyncio.run(voice_service.sintetizar_voz(bot_reply, voz_id=st.session_state.voz_id))
+        if audio_bytes:
             st.audio(audio_bytes, format="audio/mpeg", autoplay=True)
-        except Exception as e:
-            st.error("Error reproduciendo voz.")
 
 tab1, tab2 = st.tabs(["Entrevista", "Visión (Escáner de Comida)"])
 
@@ -74,13 +76,12 @@ with tab1:
         with st.chat_message("user" if role == "Usuario" else "assistant"):
             st.write(msg["content"])
             
-            # Mostrar audio inicial si existe
-            if i == 0 and role == "Coach" and st.session_state.get("initial_audio"):
-                if not st.session_state.played_initial_audio:
-                    st.audio(st.session_state.initial_audio, format="audio/mpeg", autoplay=True)
+            if msg.get("audio"):
+                if i == 0 and not st.session_state.played_initial_audio:
+                    st.audio(msg["audio"], format="audio/mpeg", autoplay=True)
                     st.session_state.played_initial_audio = True
                 else:
-                    st.audio(st.session_state.initial_audio, format="audio/mpeg")
+                    st.audio(msg["audio"], format="audio/mpeg")
             
     # Entrada de audio
     col1, col2 = st.columns([0.8, 0.2])
