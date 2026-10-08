@@ -1,5 +1,12 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
+from datetime import date
+
+class RegistroActividad(BaseModel):
+    fecha: date
+    pasos: int = Field(ge=0, description="Pasos registrados en el día")
+    minutos_ejercicio: int = Field(default=0, ge=0, description="Minutos de entrenamiento o caminata activa")
+    tipo_ejercicio: Optional[str] = "Caminata / Cardio"
 
 class PerfilUsuario(BaseModel):
     nombre: str = Field(..., description="Nombre de pila del usuario o cómo prefiere que le llamen")
@@ -12,6 +19,8 @@ class PerfilUsuario(BaseModel):
     comidas_por_dia: int = Field(..., description="Número de comidas que prefiere hacer al día")
     alergias_restricciones: Optional[str] = Field(None, description="Alergias o restricciones alimentarias (ej. vegano, sin gluten, alergia al maní)")
     condiciones_medicas: list[str] = Field(default_factory=list, description="Condiciones como diabetes, hipertensión, etc.")
+    meta_pasos_diarios: int = Field(default=8000, description="Meta de pasos diarios")
+    historial_actividad: List[RegistroActividad] = Field(default_factory=list, description="Registro histórico de actividad física")
 
 class MetricasMetabolicas(BaseModel):
     tmb: float = Field(..., description="Tasa Metabólica Basal en kcal")

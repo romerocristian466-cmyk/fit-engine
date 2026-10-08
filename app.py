@@ -33,6 +33,9 @@ voz_seleccionada = st.sidebar.radio(
 )
 st.session_state.voz_id = "dalia" if "Dalia" in voz_seleccionada else "jorge"
 
+st.sidebar.markdown("---")
+st.sidebar.caption("⚖️ **Descargo Médico:** Fit Engine es una guía de hábitos y estilo de vida. No constituye diagnóstico ni tratamiento médico.")
+
 # Inicializar estado
 if "nombre" not in st.session_state:
     st.session_state.nombre = "amigo"
@@ -65,9 +68,9 @@ def procesar_respuesta(bot_reply):
         if audio_bytes:
             st.audio(audio_bytes, format="audio/mpeg", autoplay=True)
 
-tab1, tab2 = st.tabs(["Entrevista", "Visión (Escáner de Comida)"])
+tab_chat, tab_actividad = st.tabs(["💬 Coach & Visión", "👟 Mi Actividad"])
 
-with tab1:
+with tab_chat:
     st.header("Entrevista Nutricional")
     
     # Mostrar historial
@@ -146,7 +149,8 @@ with tab1:
             except Exception as e:
                 st.error(f"Error: {e}")
 
-with tab2:
+    st.divider()
+    
     st.header("Escáner de Comida")
     uploaded_file = st.file_uploader("Sube una foto de tu plato", type=["jpg", "jpeg", "png"])
     
@@ -165,3 +169,18 @@ with tab2:
                     st.json([ing.model_dump() for ing in analisis.ingredientes])
                 except Exception as e:
                     st.error(f"Error procesando imagen: {e}")
+
+with tab_actividad:
+    st.header("Registro de Actividad Física")
+    
+    with st.form("form_actividad"):
+        fecha = st.date_input("Fecha")
+        pasos = st.number_input("Pasos registrados en el día", min_value=0, step=500, value=0)
+        mins_ejercicio = st.number_input("Minutos de ejercicio", min_value=0, step=15, value=0)
+        tipo = st.text_input("Tipo de ejercicio", value="Caminata / Cardio")
+        
+        submitted = st.form_submit_button("Guardar Registro")
+        
+        if submitted:
+            st.success(f"Se registraron {pasos} pasos y {mins_ejercicio} mins de {tipo} para el {fecha}.")
+            st.info("¡Sigue así, construyendo tu identidad saludable, 1% mejor cada día!")

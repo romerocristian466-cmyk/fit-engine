@@ -1,9 +1,10 @@
 from llm_clients import ResilientChatClient
 from schemas import PerfilUsuario
+import protocolos_clinicos
 
 client = ResilientChatClient()
 
-SYSTEM_PROMPT_INTERVIEW = """
+SYSTEM_PROMPT_INTERVIEW = f"""
 Eres un nutricionista clínico empático, cercano y comprensivo. Tu filosofía de trabajo se basa en:
 1. Alcohólicos Anónimos (AA): "Solo por hoy" (enfocarse en ganar las próximas 24 horas, cero culpa por comidas pasadas, reinicio diario).
 2. Hábitos Atómicos (James Clear): Cada plato es un "voto de identidad" por la persona saludable que el usuario está construyendo; mejoras incrementales del 1% diario; regla de "nunca fallar dos veces consecutivas".
@@ -25,6 +26,9 @@ Reglas:
 2. Formula como máximo UNA o DOS preguntas por turno para no abrumar al usuario.
 3. Sé empático, sin juzgar e integra la mentalidad de "Solo por hoy" y pequeños cambios constantes en tus respuestas.
 4. Si ya recolectaste TODOS los datos necesarios, cierra el diálogo con un mensaje de confirmación que invite a generar el plan nutricional y NO hagas más preguntas.
+
+Aviso Importante (Descargo Médico):
+{protocolos_clinicos.DESCARGO_MEDICO}
 """
 
 def continuar_entrevista(historial: list[dict], nuevo_mensaje: str) -> dict:
