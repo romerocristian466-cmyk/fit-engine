@@ -1,9 +1,26 @@
 import streamlit as st
-import requests
+import asyncio
+import os
 import json
+import dotenv
+from google import genai
+from google.genai import types
 from audio_recorder_streamlit import audio_recorder
 
-BACKEND_URL = "http://localhost:8000"
+import interview_service
+import vision_service
+import voice_service
+import metabolic_engine
+
+# Cargar variables de entorno
+dotenv.load_dotenv()
+
+# Sincronizar st.secrets con os.environ si existen
+try:
+    for key, value in st.secrets.items():
+        os.environ[key] = str(value)
+except Exception:
+    pass
 
 st.set_page_config(page_title="Fit Engine Coach", layout="centered")
 
@@ -19,13 +36,13 @@ st.session_state.voz_id = "dalia" if "Dalia" in voz_seleccionada else "jorge"
 # Inicializar estado
 if "nombre" not in st.session_state:
     st.session_state.nombre = "amigo"
+
 if "historial" not in st.session_state:
     welcome_msg = "¡Hola! Bienvenido. Estoy aquí para acompañarte a ganar un día a la vez. Para empezar a conocernos, ¿cuál es tu nombre y cómo prefieres que te llame?"
     st.session_state.historial = [{"role": "model", "content": welcome_msg}]
     try:
-        tts_resp = requests.post(f"{BACKEND_URL}/api/voz/tts", json={"texto": welcome_msg, "voz": st.session_state.voz_id})
-        if tts_resp.status_code == 200:
-            st.session_state.initial_audio = tts_resp.content
+        audio_bytes = asyncio.run(voice_service.sintetizar_voz(welcome_msg, voz_id=st.session_state.voz_id))
+        st.session_state.initial_audio = audio_bytes
     except Exception:
         st.session_state.initial_audio = None
         
@@ -41,9 +58,8 @@ def procesar_respuesta(bot_reply):
         st.write(bot_reply)
         # Generar y reproducir TTS
         try:
-            tts_resp = requests.post(f"{BACKEND_URL}/api/voz/tts", json={"texto": bot_reply, "voz": st.session_state.voz_id})
-            if tts_resp.status_code == 200:
-                st.audio(tts_resp.content, format="audio/mpeg", autoplay=True)
+            audio_bytes = asyncio.run(voice_service.sintetizar_voz(bot_reply, voz_id=st.session_state.voz_id))
+            st.audio(audio_bytes, format="audio/mpeg", autoplay=True)
         except Exception as e:
             st.error("Error reproduciendo voz.")
 
@@ -77,69 +93,55 @@ with tab1:
         with st.chat_message("user"):
             st.write(prompt)
             
-        # Llamar al backend
         try:
-            resp = requests.post(f"{BACKEND_URL}/api/entrevista/chat", json={
-                "historial": st.session_state.historial[:-1],
-                "mensaje": prompt
-            })
-            if resp.status_code == 200:
-                data = resp.json()
-                bot_reply = data.get("respuesta", "")
-                procesar_respuesta(bot_reply)
-            else:
-                st.error("Error en la respuesta del backend.")
+            resultado = interview_service.continuar_entrevista(st.session_state.historial[:-1], prompt)
+            bot_reply = resultado.get("respuesta", "")
+            procesar_respuesta(bot_reply)
         except Exception as e:
-            st.error(f"Error conectando al backend: {e}")
+            st.error(f"Error procesando chat: {e}")
             
     # Procesar entrada de audio
     if audio_bytes and audio_bytes != st.session_state.last_audio:
         st.session_state.last_audio = audio_bytes
         try:
             with st.spinner("Escuchando..."):
-                files = {"file": ("audio.wav", audio_bytes, "audio/wav")}
-                data = {
-                    "historial": json.dumps(st.session_state.historial),
-                    "voz": st.session_state.voz_id
-                }
+                # Transcribir con Gemini 2.5 Flash directamente
+                client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=[
+                        types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav"),
+                        "Transcribe de manera exacta lo que dice este audio en español, sin agregar ningún otro comentario ni formato markdown. Si está vacío o no se entiende, responde '[ININTELIGIBLE]'."
+                    ]
+                )
+                transcripcion = response.text.strip()
                 
-                resp = requests.post(f"{BACKEND_URL}/api/entrevista/voz", files=files, data=data)
+                st.session_state.historial.append({"role": "user", "content": transcripcion})
                 
-                if resp.status_code == 200:
-                    resultado = resp.json()
-                    transcripcion = resultado.get("transcripcion_usuario", "")
+                with st.chat_message("user"):
+                    st.write(f"🎤 *{transcripcion}*")
                     
-                    st.session_state.historial.append({"role": "user", "content": transcripcion})
-                    # Mostrar la transcripción
-                    with st.chat_message("user"):
-                        st.write(f"🎤 *{transcripcion}*")
-                        
-                    bot_reply = resultado.get("respuesta", "")
-                    procesar_respuesta(bot_reply)
-                    
-                    # Forzar recarga para mostrar el chat ordenado
-                    st.rerun()
-                else:
-                    st.error("Error procesando el audio.")
+                resultado = interview_service.continuar_entrevista(st.session_state.historial[:-1], transcripcion)
+                bot_reply = resultado.get("respuesta", "")
+                procesar_respuesta(bot_reply)
+                
+                st.rerun()
         except Exception as e:
-            st.error(f"Error enviando audio: {e}")
+            st.error(f"Error procesando audio: {e}")
             
     if st.button("Finalizar y Extraer Perfil"):
-        with st.spinner("Extrayendo perfil..."):
+        with st.spinner("Extrayendo perfil y calculando métricas..."):
             try:
-                resp = requests.post(f"{BACKEND_URL}/api/entrevista/finalizar", json={
-                    "historial": st.session_state.historial
+                perfil = interview_service.extraer_perfil_desde_chat(st.session_state.historial)
+                metricas = metabolic_engine.calcular_metricas(perfil)
+                
+                st.session_state.nombre = perfil.nombre
+                
+                st.success(f"¡Bienvenido al camino, {st.session_state.nombre}! Vamos a ganar un día a la vez.")
+                st.json({
+                    "perfil": perfil.model_dump(),
+                    "metricas": metricas.model_dump()
                 })
-                if resp.status_code == 200:
-                    data = resp.json()
-                    perfil = data.get("perfil", {})
-                    # Actualizar nombre en session state
-                    st.session_state.nombre = perfil.get("nombre", "amigo")
-                    
-                    st.success(f"¡Bienvenido al camino, {st.session_state.nombre}! Vamos a ganar un día a la vez.")
-                    st.json(data)
-                else:
-                    st.error("Error al extraer el perfil.")
             except Exception as e:
                 st.error(f"Error: {e}")
 
@@ -153,21 +155,12 @@ with tab2:
         if st.button("Analizar Plato"):
             with st.spinner("Analizando con Gemini Vision..."):
                 try:
-                    files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
-                    data = {"nombre": st.session_state.nombre}
+                    analisis = vision_service.analizar_imagen_comida(uploaded_file.getvalue(), nombre_usuario=st.session_state.nombre)
                     
-                    resp = requests.post(f"{BACKEND_URL}/api/comidas/analizar-foto", files=files, data=data)
+                    st.info(f"**Mensaje del Coach:**\n\n{analisis.mensaje_coach}")
                     
-                    if resp.status_code == 200:
-                        analisis = resp.json()
-                        
-                        # Mostrar el mensaje del coach destacado
-                        st.info(f"**Mensaje del Coach:**\n\n{analisis.get('mensaje_coach', '')}")
-                        
-                        st.write("### Desglose Nutricional")
-                        st.write(f"**Calorías Totales:** {analisis.get('calorias_totales')} kcal")
-                        st.json(analisis.get("ingredientes", []))
-                    else:
-                        st.error("Error en el análisis de la imagen.")
+                    st.write("### Desglose Nutricional")
+                    st.write(f"**Calorías Totales:** {analisis.calorias_totales} kcal")
+                    st.json([ing.model_dump() for ing in analisis.ingredientes])
                 except Exception as e:
-                    st.error(f"Error conectando al backend: {e}")
+                    st.error(f"Error procesando imagen: {e}")
