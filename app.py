@@ -5,7 +5,8 @@ Streamlit Cloud ready.
 """
 import streamlit as st
 import os
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import dotenv
 import plotly.graph_objects as go
@@ -36,6 +37,9 @@ except Exception:
 st.set_page_config(page_title="Fit Engine Coach", layout="centered")
 st.title("🍏 Fit Engine Coach")
 
+st.sidebar.subheader("👤 Tu perfil")
+nombre_sidebar = st.sidebar.text_input("Tu nombre", key="nombre_sidebar", value="amigo")
+
 st.sidebar.subheader("⚖️ Tu perfil de lastre")
 lastre_munecas_lb_sidebar = st.sidebar.number_input(
     "Pesas de muñecas (lb por mano)",
@@ -64,9 +68,6 @@ st.sidebar.caption(
 # ──────────────────────────────────────────────────────────────────────────────
 # Estado de sesión
 # ──────────────────────────────────────────────────────────────────────────────
-if "nombre" not in st.session_state:
-    st.session_state.nombre = "amigo"
-
 if "historial_chat" not in st.session_state:
     st.session_state.historial_chat = [
         {
@@ -91,17 +92,20 @@ Tu filosofía se basa en:
 Tu rol es orientar al usuario en nutrición, actividad física y hábitos saludables mediante
 conversación de texto. Haz máximo 1-2 preguntas por turno. Sé cálido, sin juzgar.
 
+Reglas:
+- Si el usuario menciona trastorno alimenticio, restricción extrema, ser menor de edad o embarazo, no dar cifras de calorías y recomendar hablar con un profesional de salud.
+
 DESCARGO MÉDICO: Fit Engine es una herramienta de acompañamiento de hábitos. No proporciona
 diagnósticos médicos ni reemplaza la evaluación de un profesional de salud."""
 
 
 def obtener_respuesta_coach(historial: list[dict]) -> str:
-    """Llama a Gemini con el historial completo y retorna la respuesta del coach."""
+    """Llama a Gemini con los últimos 12 mensajes del historial y retorna la respuesta del coach."""
     try:
         client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-        # Construir el contenido para Gemini
+        # Construir el contenido para Gemini solo con los últimos 12 mensajes
         contents = []
-        for msg in historial:
+        for msg in historial[-12:]:
             role = "user" if msg["role"] == "user" else "model"
             contents.append({"role": role, "parts": [{"text": msg["content"]}]})
 
@@ -111,8 +115,8 @@ def obtener_respuesta_coach(historial: list[dict]) -> str:
             config={"system_instruction": SYSTEM_PROMPT_COACH},
         )
         return response.text.strip()
-    except Exception as e:
-        return f"⚠️ Error al conectar con el coach: {e}"
+    except Exception:
+        return "No pude conectar con el coach, intenta de nuevo"
 
 
 def calcular_compliance(pasos: int, meta: int, minutos: int, protocol_rest: bool) -> float:
@@ -128,11 +132,15 @@ def _racha(df: "pd.DataFrame") -> int:
     try:
         df_sorted = df.sort_values("fecha", ascending=False)
         racha = 0
-        hoy = pd.Timestamp(date.today())
+        hoy = pd.Timestamp(datetime.now(ZoneInfo("America/El_Salvador")).date())
         for _, row in df_sorted.iterrows():
-            if row["compliance_score"] >= 80 and (hoy - row["fecha"]).days <= racha + 1:
-                racha += 1
-                hoy = row["fecha"]
+            if row["compliance_score"] >= 80:
+                diff = (hoy - row["fecha"]).days
+                if diff == 0 or diff == 1:
+                    racha += 1
+                    hoy = row["fecha"]
+                else:
+                    break
             else:
                 break
         return racha
@@ -167,10 +175,6 @@ with tab_chat:
         # Guardar y mostrar mensaje del usuario
         st.session_state.historial_chat.append({"role": "user", "content": prompt})
 
-        # Detectar nombre del usuario si aún es "amigo"
-        if st.session_state.nombre == "amigo" and len(prompt.split()) <= 4:
-            st.session_state.nombre = prompt.strip().split()[0].capitalize()
-
         with st.chat_message("user"):
             st.write(prompt)
 
@@ -189,7 +193,7 @@ with tab_chat:
                 {
                     "role": "assistant",
                     "content": (
-                        f"¡Hola de nuevo, {st.session_state.nombre}! 🍏 "
+                        f"¡Hola de nuevo, {st.session_state.nombre_sidebar}! 🍏 "
                         "¿En qué te puedo ayudar hoy?"
                     ),
                 }
@@ -211,7 +215,7 @@ with tab_chat:
                 try:
                     analisis = vision_service.analizar_imagen_comida(
                         uploaded_file.getvalue(),
-                        nombre_usuario=st.session_state.nombre,
+                        nombre_usuario=st.session_state.nombre_sidebar,
                     )
                     st.info(f"**Mensaje del Coach:**\n\n{analisis.mensaje_coach}")
                     st.write("### Desglose Nutricional")
@@ -234,6 +238,7 @@ with tab_actividad:
     if modo_recuperacion:
         META_PASOS_SUGERIDA = 7000
         LASTRE_SUGERIDO_LB  = 1.0
+        LASTRE_SUGERIDO_TOBILLOS_LB = 1.0
         st.warning(
             "⚠️ **Modo Recuperación Activado** — Los últimos 2 días registrados "
             "no incluyeron descanso (`protocol_rest = 0`). "
@@ -244,15 +249,16 @@ with tab_actividad:
     else:
         META_PASOS_SUGERIDA = META_PASOS_DEFAULT
         LASTRE_SUGERIDO_LB  = lastre_munecas_lb_sidebar
+        LASTRE_SUGERIDO_TOBILLOS_LB = lastre_tobillos_lb_sidebar
 
     st.info(
         f"🎯 Meta recomendada hoy: **{META_PASOS_SUGERIDA:,} pasos** · "
-        f"Lastre sugerido: **{LASTRE_SUGERIDO_LB} lb/extremidad**"
+        f"Lastre sugerido: **{LASTRE_SUGERIDO_LB} lb muñecas / {LASTRE_SUGERIDO_TOBILLOS_LB} lb tobillos**"
     )
 
     # ── Formulario de registro ───────────────────────────────────────────────
     with st.form("form_actividad"):
-        fecha          = st.date_input("Fecha", value=date.today())
+        fecha          = st.date_input("Fecha", value=datetime.now(ZoneInfo("America/El_Salvador")).date())
         pasos          = st.number_input(
             "Pasos registrados en el día", min_value=0, step=500, value=0
         )
@@ -272,7 +278,7 @@ with tab_actividad:
             lastre_tobillos = st.number_input(
                 "Lastre tobillos (lb por pie)",
                 min_value=0.0, max_value=10.0,
-                value=float(LASTRE_SUGERIDO_LB), step=0.5,
+                value=float(LASTRE_SUGERIDO_TOBILLOS_LB), step=0.5,
             )
 
         protocol_rest = st.checkbox(
@@ -476,7 +482,7 @@ def generar_pdf_reporte(nombre: str, registros: list[dict], peso_kg: float) -> b
     pdf.set_font("Helvetica", "", 12)
     pdf.set_text_color(80, 80, 80)
     pdf.cell(0, 8, "Reporte Clinico Semanal", ln=True, align="C")
-    pdf.cell(0, 6, f"Generado el: {date.today().strftime('%d/%m/%Y')}", ln=True, align="C")
+    pdf.cell(0, 6, f"Generado el: {datetime.now(ZoneInfo('America/El_Salvador')).date().strftime('%d/%m/%Y')}", ln=True, align="C")
     pdf.cell(0, 6, f"Paciente / Usuario: {nombre}", ln=True, align="C")
     pdf.ln(8)
     pdf.set_draw_color(39, 174, 96)
@@ -566,7 +572,7 @@ with tab_reporte:
         "pasos totales, gasto calórico con lastre y cumplimiento de protocolos."
     )
     nombre_reporte = st.text_input(
-        "Tu nombre (para el reporte)", value=st.session_state.nombre.capitalize()
+        "Tu nombre (para el reporte)", value=st.session_state.nombre_sidebar.capitalize()
     )
     if st.button("⚙️ Generar PDF"):
         registros_sem = db.obtener_ultimos_registros(7)
@@ -582,7 +588,7 @@ with tab_reporte:
             st.download_button(
                 label="📥 Descargar Reporte PDF",
                 data=pdf_bytes,
-                file_name=f"fit_engine_reporte_{date.today()}.pdf",
+                file_name=f"fit_engine_reporte_{datetime.now(ZoneInfo('America/El_Salvador')).date()}.pdf",
                 mime="application/pdf",
             )
             st.success("✅ PDF listo. Haz clic arriba para descargarlo.")
