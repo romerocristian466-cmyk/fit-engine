@@ -2,6 +2,7 @@ import streamlit as st
 import asyncio
 import os
 import json
+import requests
 import dotenv
 from google import genai
 from google.genai import types
@@ -14,6 +15,10 @@ import metabolic_engine
 
 # Cargar variables de entorno
 dotenv.load_dotenv()
+
+# ── CallMeBot: credenciales leídas desde secrets (Streamlit Cloud) o .env
+CALLMEBOT_PHONE  = os.getenv("CALLMEBOT_PHONE", "")
+CALLMEBOT_APIKEY = os.getenv("CALLMEBOT_APIKEY", "")
 
 # Sincronizar st.secrets con os.environ si existen
 try:
@@ -33,6 +38,22 @@ voz_seleccionada = st.sidebar.radio(
 )
 st.session_state.voz_id = "dalia" if "Dalia" in voz_seleccionada else "jorge"
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("📲 CallMeBot")
+cmb_phone = st.sidebar.text_input(
+    "Tu número (con código de país)",
+    value=CALLMEBOT_PHONE,
+    placeholder="521XXXXXXXXXX",
+    help="Ej: 521XXXXXXXXXX para México. Sin el signo +.",
+    key="cmb_phone"
+)
+cmb_apikey = st.sidebar.text_input(
+    "Tu API Key de CallMeBot",
+    value=CALLMEBOT_APIKEY,
+    type="password",
+    help="Obtén tu clave gratis enviando 'I allow callmebot to send me messages' al +34 644 14 77 42 por WhatsApp.",
+    key="cmb_apikey"
+)
 st.sidebar.markdown("---")
 st.sidebar.caption("⚖️ **Descargo Médico:** Fit Engine es una guía de hábitos y estilo de vida. No constituye diagnóstico ni tratamiento médico.")
 
@@ -68,7 +89,7 @@ def procesar_respuesta(bot_reply):
         if audio_bytes:
             st.audio(audio_bytes, format="audio/mpeg", autoplay=True)
 
-tab_chat, tab_actividad = st.tabs(["💬 Coach & Visión", "👟 Mi Actividad"])
+tab_chat, tab_actividad, tab_whatsapp = st.tabs(["💬 Coach & Visión", "👟 Mi Actividad", "📲 Alertas WhatsApp"])
 
 with tab_chat:
     st.header("Entrevista Nutricional")
@@ -184,3 +205,78 @@ with tab_actividad:
         if submitted:
             st.success(f"Se registraron {pasos} pasos y {mins_ejercicio} mins de {tipo} para el {fecha}.")
             st.info("¡Sigue así, construyendo tu identidad saludable, 1% mejor cada día!")
+
+# ─────────────────────────────────────────────────────────────────
+# TAB 3 — Alertas WhatsApp (CallMeBot — sin servidor propio)
+# ─────────────────────────────────────────────────────────────────
+def enviar_whatsapp_callmebot(telefono: str, mensaje: str, api_key: str) -> requests.Response:
+    """Envía un mensaje de WhatsApp a través de la API gratuita de CallMeBot.
+
+    Docs: https://www.callmebot.com/blog/free-api-whatsapp-messages/
+    """
+    url = "https://api.callmebot.com/whatsapp.php"
+    params = {
+        "phone":  telefono,
+        "text":   mensaje,
+        "apikey": api_key,
+    }
+    return requests.get(url, params=params, timeout=15)
+
+
+with tab_whatsapp:
+    st.header("📲 Alertas de WhatsApp")
+    st.markdown(
+        "Envía recordatorios y alertas directamente a tu WhatsApp usando "
+        "**[CallMeBot](https://www.callmebot.com/blog/free-api-whatsapp-messages/)** "
+        "— sin servidores, sin Docker, funciona 100 % en la nube. \n\n"
+        "> 🔑 Configura tu número y API Key en la **barra lateral** antes de enviar."
+    )
+
+    st.info(
+        "**¿Aún no tienes API Key?** Envía el mensaje `I allow callmebot to send me messages` "
+        "al número **+34 644 14 77 42** por WhatsApp y recibirás tu clave en segundos.",
+        icon="ℹ️"
+    )
+
+    with st.form("form_whatsapp"):
+        mensaje_alerta = st.text_area(
+            "✉️ Mensaje a enviar",
+            placeholder="Ej: ¡Hola! Recuerda tomar agua y completar tus 8,000 pasos hoy 💪",
+            height=140
+        )
+        enviar = st.form_submit_button("📤 Enviar Alerta por WhatsApp")
+
+    if enviar:
+        telefono_final = st.session_state.get("cmb_phone", "").strip()
+        apikey_final   = st.session_state.get("cmb_apikey", "").strip()
+
+        if not telefono_final:
+            st.warning("⚠️ Ingresa tu número de WhatsApp en la barra lateral.")
+        elif not apikey_final:
+            st.warning("⚠️ Ingresa tu API Key de CallMeBot en la barra lateral.")
+        elif not mensaje_alerta.strip():
+            st.warning("⚠️ El mensaje no puede estar vacío.")
+        else:
+            with st.spinner("Enviando mensaje a WhatsApp…"):
+                try:
+                    resp = enviar_whatsapp_callmebot(
+                        telefono=telefono_final,
+                        mensaje=mensaje_alerta.strip(),
+                        api_key=apikey_final
+                    )
+                    if resp.status_code == 200:
+                        st.success(f"✅ Mensaje enviado correctamente al número `+{telefono_final}`.")
+                        st.caption(f"Respuesta de CallMeBot: {resp.text}")
+                    else:
+                        st.error(f"❌ Error {resp.status_code} al enviar el mensaje.")
+                        st.code(resp.text)
+                except requests.exceptions.Timeout:
+                    st.error("❌ CallMeBot tardó demasiado en responder. Intenta de nuevo.")
+                except Exception as exc:
+                    st.error(f"❌ Error inesperado: {exc}")
+
+    st.divider()
+    st.caption(
+        "💡 **Tip:** Para automatizar alertas diarias, puedes llamar a `enviar_whatsapp_callmebot()` "
+        "desde cualquier otro módulo del proyecto pasando número, mensaje y API key."
+    )
