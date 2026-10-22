@@ -1,25 +1,19 @@
 """
 Fit Engine v2.0 — app.py
-Coach de Salud IA con persistencia SQLite, reportes PDF, ajuste metabólico
-proactivo y mapa de calor de cumplimiento.
+Coach de Salud IA | 100% texto | Sin audio ni dependencias de voz.
+Streamlit Cloud ready.
 """
 import streamlit as st
-import asyncio
 import os
-import io
-import json
-from datetime import date, timedelta
+from datetime import date
 
 import dotenv
-from google import genai
-from google.genai import types
-from audio_recorder_streamlit import audio_recorder
 import plotly.graph_objects as go
+import pandas as pd
 from fpdf import FPDF
+from google import genai
 
-import interview_service
 import vision_service
-import voice_service
 import metabolic_engine
 import db
 
@@ -42,14 +36,6 @@ except Exception:
 st.set_page_config(page_title="Fit Engine Coach", layout="centered")
 st.title("🍏 Fit Engine Coach")
 
-voz_seleccionada = st.sidebar.radio(
-    "🎙️ Voz del Coach",
-    options=["Dalia (Femenina)", "Jorge (Masculino)"],
-    index=0,
-)
-st.session_state.voz_id = "dalia" if "Dalia" in voz_seleccionada else "jorge"
-
-st.sidebar.markdown("---")
 st.sidebar.subheader("⚖️ Tu perfil de lastre")
 lastre_munecas_lb_sidebar = st.sidebar.number_input(
     "Pesas de muñecas (lb por mano)",
@@ -81,153 +67,146 @@ st.sidebar.caption(
 if "nombre" not in st.session_state:
     st.session_state.nombre = "amigo"
 
-if "historial" not in st.session_state:
-    welcome_msg = (
-        "¡Hola! Bienvenido. Estoy aquí para acompañarte a ganar un día a la vez. "
-        "Para empezar a conocernos, ¿cuál es tu nombre y cómo prefieres que te llame?"
-    )
-    try:
-        audio_bytes = asyncio.run(
-            voice_service.sintetizar_voz(welcome_msg, voz_id=st.session_state.voz_id)
-        )
-    except Exception:
-        audio_bytes = None
-    st.session_state.historial = [
-        {"role": "model", "content": welcome_msg, "audio": audio_bytes}
+if "historial_chat" not in st.session_state:
+    st.session_state.historial_chat = [
+        {
+            "role": "assistant",
+            "content": (
+                "¡Hola! Bienvenido a Fit Engine 🍏. Soy tu coach de salud. "
+                "Para conocernos, ¿cuál es tu nombre y cuál es tu objetivo principal "
+                "(perder grasa, mantener peso o ganar músculo)?"
+            ),
+        }
     ]
-
-if "last_audio" not in st.session_state:
-    st.session_state.last_audio = None
-
-if "played_initial_audio" not in st.session_state:
-    st.session_state.played_initial_audio = False
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
-def procesar_respuesta(bot_reply: str) -> None:
-    try:
-        audio_bytes = asyncio.run(
-            voice_service.sintetizar_voz(bot_reply, voz_id=st.session_state.voz_id)
-        )
-    except Exception:
-        audio_bytes = None
 
-    st.session_state.historial.append(
-        {"role": "model", "content": bot_reply, "audio": audio_bytes}
-    )
-    with st.chat_message("assistant"):
-        st.write(bot_reply)
-        if audio_bytes:
-            st.audio(audio_bytes, format="audio/mpeg", autoplay=True)
+SYSTEM_PROMPT_COACH = """Eres un coach de salud y nutrición empático llamado Fit Engine.
+Tu filosofía se basa en:
+- "Solo por hoy" (Alcohólicos Anónimos): enfocarse en ganar las próximas 24 horas.
+- Hábitos Atómicos (James Clear): mejoras del 1% diario, sin culpa por el pasado.
+
+Tu rol es orientar al usuario en nutrición, actividad física y hábitos saludables mediante
+conversación de texto. Haz máximo 1-2 preguntas por turno. Sé cálido, sin juzgar.
+
+DESCARGO MÉDICO: Fit Engine es una herramienta de acompañamiento de hábitos. No proporciona
+diagnósticos médicos ni reemplaza la evaluación de un profesional de salud."""
+
+
+def obtener_respuesta_coach(historial: list[dict]) -> str:
+    """Llama a Gemini con el historial completo y retorna la respuesta del coach."""
+    try:
+        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        # Construir el contenido para Gemini
+        contents = []
+        for msg in historial:
+            role = "user" if msg["role"] == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=contents,
+            config={"system_instruction": SYSTEM_PROMPT_COACH},
+        )
+        return response.text.strip()
+    except Exception as e:
+        return f"⚠️ Error al conectar con el coach: {e}"
 
 
 def calcular_compliance(pasos: int, meta: int, minutos: int, protocol_rest: bool) -> float:
     """Score 0-100 basado en cumplimiento de pasos, ejercicio y descanso."""
-    score_pasos    = min(pasos / meta, 1.0) * 50.0
+    score_pasos     = min(pasos / meta, 1.0) * 50.0
     score_ejercicio = min(minutos / 30.0, 1.0) * 30.0
     score_descanso  = 20.0 if protocol_rest else 0.0
     return round(score_pasos + score_ejercicio + score_descanso, 1)
+
+
+def _racha(df: "pd.DataFrame") -> int:
+    """Calcula la racha de días consecutivos con compliance ≥ 80%."""
+    try:
+        df_sorted = df.sort_values("fecha", ascending=False)
+        racha = 0
+        hoy = pd.Timestamp(date.today())
+        for _, row in df_sorted.iterrows():
+            if row["compliance_score"] >= 80 and (hoy - row["fecha"]).days <= racha + 1:
+                racha += 1
+                hoy = row["fecha"]
+            else:
+                break
+        return racha
+    except Exception:
+        return 0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tabs
 # ──────────────────────────────────────────────────────────────────────────────
 tab_chat, tab_actividad, tab_dashboard, tab_reporte = st.tabs([
-    "💬 Coach & Visión",
+    "💬 Coach IA",
     "👟 Mi Actividad",
     "📊 Dashboard",
     "📄 Reporte Clínico",
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — Coach & Visión
+# TAB 1 — Coach IA (chat de texto puro, sin audio)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_chat:
-    st.header("Entrevista Nutricional")
+    st.header("💬 Coach de Salud IA")
+    st.caption("Chatea con tu coach para recibir orientación personalizada en nutrición y hábitos.")
 
-    for i, msg in enumerate(st.session_state.historial):
-        role = "Usuario" if msg["role"] == "user" else "Coach"
-        with st.chat_message("user" if role == "Usuario" else "assistant"):
+    # ── Mostrar historial ────────────────────────────────────────────────────
+    for msg in st.session_state.historial_chat:
+        with st.chat_message(msg["role"]):
             st.write(msg["content"])
-            if msg.get("audio"):
-                if i == 0 and not st.session_state.played_initial_audio:
-                    st.audio(msg["audio"], format="audio/mpeg", autoplay=True)
-                    st.session_state.played_initial_audio = True
-                else:
-                    st.audio(msg["audio"], format="audio/mpeg")
 
-    col1, col2 = st.columns([0.8, 0.2])
-    with col2:
-        audio_bytes = audio_recorder(text="Voz", icon_size="2x", key="audio_mic")
-
+    # ── Entrada de texto ─────────────────────────────────────────────────────
     if prompt := st.chat_input("Escribe tu mensaje aquí..."):
-        st.session_state.historial.append({"role": "user", "content": prompt})
+        # Guardar y mostrar mensaje del usuario
+        st.session_state.historial_chat.append({"role": "user", "content": prompt})
+
+        # Detectar nombre del usuario si aún es "amigo"
+        if st.session_state.nombre == "amigo" and len(prompt.split()) <= 4:
+            st.session_state.nombre = prompt.strip().split()[0].capitalize()
+
         with st.chat_message("user"):
             st.write(prompt)
-        try:
-            resultado = interview_service.continuar_entrevista(
-                st.session_state.historial[:-1], prompt
-            )
-            procesar_respuesta(resultado.get("respuesta", ""))
-        except Exception as e:
-            st.error(f"Error procesando chat: {e}")
 
-    if audio_bytes and audio_bytes != st.session_state.last_audio:
-        st.session_state.last_audio = audio_bytes
-        try:
-            with st.spinner("Escuchando..."):
-                client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-                response = client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=[
-                        types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav"),
-                        (
-                            "Transcribe de manera exacta lo que dice este audio en español, "
-                            "sin agregar ningún otro comentario ni formato markdown. "
-                            "Si está vacío o no se entiende, responde '[ININTELIGIBLE]'."
-                        ),
-                    ],
-                )
-                transcripcion = response.text.strip()
-                st.session_state.historial.append(
-                    {"role": "user", "content": transcripcion}
-                )
-                with st.chat_message("user"):
-                    st.write(f"🎤 *{transcripcion}*")
-                resultado = interview_service.continuar_entrevista(
-                    st.session_state.historial[:-1], transcripcion
-                )
-                procesar_respuesta(resultado.get("respuesta", ""))
-                st.rerun()
-        except Exception as e:
-            st.error(f"Error procesando audio: {e}")
+        # Obtener y mostrar respuesta del coach
+        with st.spinner("El coach está pensando..."):
+            respuesta = obtener_respuesta_coach(st.session_state.historial_chat)
 
-    if st.button("Finalizar y Extraer Perfil"):
-        with st.spinner("Extrayendo perfil y calculando métricas..."):
-            try:
-                perfil = interview_service.extraer_perfil_desde_chat(
-                    st.session_state.historial
-                )
-                metricas = metabolic_engine.calcular_metricas(perfil)
-                st.session_state.nombre = perfil.nombre
-                st.success(
-                    f"¡Bienvenido al camino, {st.session_state.nombre}! "
-                    "Vamos a ganar un día a la vez."
-                )
-                st.json({"perfil": perfil.model_dump(), "metricas": metricas.model_dump()})
-            except Exception as e:
-                st.error(f"Error: {e}")
+        st.session_state.historial_chat.append({"role": "assistant", "content": respuesta})
+        with st.chat_message("assistant"):
+            st.write(respuesta)
+
+    # ── Botón para limpiar el chat ───────────────────────────────────────────
+    if len(st.session_state.historial_chat) > 1:
+        if st.button("🔄 Iniciar nueva conversación"):
+            st.session_state.historial_chat = [
+                {
+                    "role": "assistant",
+                    "content": (
+                        f"¡Hola de nuevo, {st.session_state.nombre}! 🍏 "
+                        "¿En qué te puedo ayudar hoy?"
+                    ),
+                }
+            ]
+            st.rerun()
 
     st.divider()
-    st.header("Escáner de Comida")
+
+    # ── Escáner de Comida con Gemini Vision ──────────────────────────────────
+    st.header("🍽️ Escáner de Comida")
+    st.caption("Sube una foto de tu plato y el coach analizará su contenido nutricional.")
     uploaded_file = st.file_uploader(
         "Sube una foto de tu plato", type=["jpg", "jpeg", "png"]
     )
     if uploaded_file is not None:
-        st.image(uploaded_file, caption="Plato a analizar")
-        if st.button("Analizar Plato"):
+        st.image(uploaded_file, caption="Plato a analizar", use_container_width=True)
+        if st.button("🔍 Analizar Plato"):
             with st.spinner("Analizando con Gemini Vision..."):
                 try:
                     analisis = vision_service.analizar_imagen_comida(
@@ -243,14 +222,14 @@ with tab_chat:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — Mi Actividad (con ajuste metabólico proactivo y persistencia SQLite)
+# TAB 2 — Mi Actividad (ajuste metabólico proactivo + persistencia SQLite)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_actividad:
     st.header("👟 Registro de Actividad Física")
 
     # ── Ajuste Metabólico Proactivo ──────────────────────────────────────────
-    modo_recuperacion = db.necesita_ajuste_recuperacion()
-    META_PASOS_DEFAULT = 8000
+    modo_recuperacion   = db.necesita_ajuste_recuperacion()
+    META_PASOS_DEFAULT  = 8000
 
     if modo_recuperacion:
         META_PASOS_SUGERIDA = 7000
@@ -273,14 +252,14 @@ with tab_actividad:
 
     # ── Formulario de registro ───────────────────────────────────────────────
     with st.form("form_actividad"):
-        fecha           = st.date_input("Fecha", value=date.today())
-        pasos           = st.number_input(
+        fecha          = st.date_input("Fecha", value=date.today())
+        pasos          = st.number_input(
             "Pasos registrados en el día", min_value=0, step=500, value=0
         )
-        mins_ejercicio  = st.number_input(
+        mins_ejercicio = st.number_input(
             "Minutos de ejercicio", min_value=0, step=15, value=0
         )
-        tipo            = st.text_input("Tipo de ejercicio", value="Caminata / Cardio")
+        tipo           = st.text_input("Tipo de ejercicio", value="Caminata / Cardio")
 
         col_a, col_b = st.columns(2)
         with col_a:
@@ -300,12 +279,16 @@ with tab_actividad:
             "✅ Hoy completé mi protocolo de descanso / recuperación",
             value=False,
         )
-        notas = st.text_area("Notas opcionales", height=80, placeholder="¿Cómo te sentiste hoy?")
+        notas = st.text_area(
+            "Notas opcionales", height=80, placeholder="¿Cómo te sentiste hoy?"
+        )
 
         submitted = st.form_submit_button("💾 Guardar Registro")
 
     if submitted:
-        compliance = calcular_compliance(pasos, META_PASOS_SUGERIDA, mins_ejercicio, protocol_rest)
+        compliance = calcular_compliance(
+            pasos, META_PASOS_SUGERIDA, mins_ejercicio, protocol_rest
+        )
         kcal = db.calcular_calorias_con_lastre(
             pasos=pasos,
             peso_usuario_kg=peso_usuario_kg_sidebar,
@@ -326,15 +309,15 @@ with tab_actividad:
         )
         st.success(
             f"✅ Registro guardado — {pasos:,} pasos · {mins_ejercicio} min · "
-            f"~**{kcal} kcal** quemadas con lastre · Score: **{compliance}/100**"
+            f"~**{kcal} kcal** con lastre · Score: **{compliance}/100**"
         )
         if compliance >= 80:
             st.balloons()
-            st.info("🏆 ¡Día de élite! Sigue construyendo tu identidad saludable, 1% mejor cada día.")
+            st.info("🏆 ¡Día de élite! Sigue construyendo tu identidad, 1% mejor cada día.")
         elif compliance >= 50:
             st.info("💪 ¡Buen esfuerzo! Mañana puedes superarlo.")
         else:
-            st.warning("📉 Día difícil. Recuerda: el movimiento consistente gana la batalla, no la perfección.")
+            st.warning("📉 Día difícil. El movimiento consistente gana la batalla, no la perfección.")
 
     # ── Historial reciente ───────────────────────────────────────────────────
     st.divider()
@@ -344,12 +327,12 @@ with tab_actividad:
         st.dataframe(
             registros,
             column_config={
-                "fecha":               st.column_config.DateColumn("Fecha"),
-                "pasos":               st.column_config.NumberColumn("Pasos", format="%d"),
-                "compliance_score":    st.column_config.ProgressColumn("Score %", min_value=0, max_value=100),
-                "lastre_munecas_lb":   st.column_config.NumberColumn("Lastre M. (lb)"),
-                "lastre_tobillos_lb":  st.column_config.NumberColumn("Lastre T. (lb)"),
-                "protocol_rest":       st.column_config.CheckboxColumn("Descanso"),
+                "fecha":              st.column_config.DateColumn("Fecha"),
+                "pasos":              st.column_config.NumberColumn("Pasos", format="%d"),
+                "compliance_score":   st.column_config.ProgressColumn("Score %", min_value=0, max_value=100),
+                "lastre_munecas_lb":  st.column_config.NumberColumn("Lastre M. (lb)"),
+                "lastre_tobillos_lb": st.column_config.NumberColumn("Lastre T. (lb)"),
+                "protocol_rest":      st.column_config.CheckboxColumn("Descanso"),
             },
             hide_index=True,
             use_container_width=True,
@@ -364,75 +347,58 @@ with tab_actividad:
 with tab_dashboard:
     st.header("📊 Dashboard de Progreso")
 
-    registros_30 = db.obtener_rango(dias=90)
+    registros_90 = db.obtener_rango(dias=90)
 
-    if not registros_30:
-        st.info("Aún no hay registros. Empieza a registrar tu actividad en la pestaña 👟.")
+    if not registros_90:
+        st.info("Aún no hay registros. Empieza a registrar en la pestaña 👟.")
     else:
-        import pandas as pd
-
-        df = pd.DataFrame(registros_30)
-        df["fecha"] = pd.to_datetime(df["fecha"])
-        df["semana"] = df["fecha"].dt.isocalendar().week.astype(int)
+        df = pd.DataFrame(registros_90)
+        df["fecha"]      = pd.to_datetime(df["fecha"])
+        df["semana"]     = df["fecha"].dt.isocalendar().week.astype(int)
         df["dia_semana"] = df["fecha"].dt.dayofweek   # 0=Lun … 6=Dom
-        df["dia_nombre"] = df["fecha"].dt.strftime("%a %d/%m")
 
         # ── KPIs rápidos ──────────────────────────────────────────────────
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("📅 Días registrados", len(df))
         col2.metric("👟 Pasos promedio", f"{int(df['pasos'].mean()):,}")
         col3.metric("🏆 Score promedio", f"{df['compliance_score'].mean():.1f}/100")
-        col4.metric(
-            "🔥 Racha actual",
-            f"{_racha(df)} días",
-            help="Días consecutivos con compliance_score ≥ 80%",
-        )
+        col4.metric("🔥 Racha actual", f"{_racha(df)} días")
 
         st.divider()
 
         # ── Mapa de Calor de Cumplimiento ──────────────────────────────────
         st.subheader("🗓️ Mapa de Calor — Cumplimiento Diario")
-        st.caption("🟢 Verde ≥ 80% · 🔴 Rojo < 80%")
+        st.caption("🟢 Verde ≥ 80%  ·  🟠 Naranja 50-79%  ·  🔴 Rojo < 50%")
 
-        # Construir matriz semana × día
-        semanas_unicas = sorted(df["semana"].unique())
-        dias_labels    = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
-
-        # Pivotear: eje X = semana, eje Y = día de semana
+        dias_labels = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
         pivot = df.pivot_table(
             index="dia_semana", columns="semana",
-            values="compliance_score", aggfunc="mean"
+            values="compliance_score", aggfunc="mean",
         ).reindex(range(7))
 
-        z_values = pivot.values.tolist()
-        # Anotar con el score o "-" si no hay dato
+        z_values  = pivot.values.tolist()
         text_vals = [
-            [
-                f"{v:.0f}%" if v == v else "—"   # NaN check
-                for v in row
-            ]
+            [f"{v:.0f}%" if v == v else "—" for v in row]   # NaN → "—"
             for row in z_values
         ]
 
-        fig_heat = go.Figure(
-            go.Heatmap(
-                z=z_values,
-                x=[f"Sem {s}" for s in pivot.columns],
-                y=dias_labels,
-                text=text_vals,
-                texttemplate="%{text}",
-                textfont={"size": 11, "color": "white"},
-                colorscale=[
-                    [0.0,  "#c0392b"],   # rojo — 0%
-                    [0.79, "#e67e22"],   # naranja — 79%
-                    [0.80, "#27ae60"],   # verde — 80%+
-                    [1.0,  "#1abc9c"],   # verde claro — 100%
-                ],
-                zmin=0, zmax=100,
-                showscale=True,
-                colorbar=dict(title="Score %", ticksuffix="%"),
-            )
-        )
+        fig_heat = go.Figure(go.Heatmap(
+            z=z_values,
+            x=[f"Sem {s}" for s in pivot.columns],
+            y=dias_labels,
+            text=text_vals,
+            texttemplate="%{text}",
+            textfont={"size": 11, "color": "white"},
+            colorscale=[
+                [0.0,  "#c0392b"],
+                [0.79, "#e67e22"],
+                [0.80, "#27ae60"],
+                [1.0,  "#1abc9c"],
+            ],
+            zmin=0, zmax=100,
+            showscale=True,
+            colorbar=dict(title="Score %", ticksuffix="%"),
+        ))
         fig_heat.update_layout(
             height=320,
             margin=dict(l=60, r=20, t=30, b=30),
@@ -456,8 +422,7 @@ with tab_dashboard:
             name="Pasos",
         ))
         fig_pasos.add_hline(
-            y=8000, line_dash="dash",
-            line_color="#27ae60", opacity=0.6,
+            y=8000, line_dash="dash", line_color="#27ae60", opacity=0.6,
             annotation_text="Meta 8,000", annotation_position="bottom right",
         )
         fig_pasos.update_layout(
@@ -470,7 +435,7 @@ with tab_dashboard:
 
         st.divider()
 
-        # ── Gasto calórico con lastre (barras) ─────────────────────────────
+        # ── Gasto calórico con lastre ───────────────────────────────────────
         st.subheader("🔥 Gasto calórico estimado con lastre")
         kcal_lista = [
             db.calcular_calorias_con_lastre(
@@ -480,12 +445,11 @@ with tab_dashboard:
                 lastre_tobillos_lb=r["lastre_tobillos_lb"],
                 mins_ejercicio=r["minutos_ejercicio"],
             )
-            for r in registros_30
+            for r in registros_90
         ]
         fig_kcal = go.Figure(go.Bar(
             x=df["fecha"], y=kcal_lista,
             marker_color=["#e74c3c" if k < 300 else "#2ecc71" for k in kcal_lista],
-            name="kcal",
         ))
         fig_kcal.update_layout(
             height=260, showlegend=False,
@@ -496,94 +460,37 @@ with tab_dashboard:
         st.plotly_chart(fig_kcal, use_container_width=True)
 
 
-def _racha(df) -> int:
-    """Calcula la racha de días consecutivos con compliance ≥ 80%."""
-    try:
-        import pandas as pd
-        df_sorted = df.sort_values("fecha", ascending=False)
-        racha = 0
-        hoy = pd.Timestamp(date.today())
-        for _, row in df_sorted.iterrows():
-            if row["compliance_score"] >= 80 and (hoy - row["fecha"]).days <= racha + 1:
-                racha += 1
-                hoy = row["fecha"]
-            else:
-                break
-        return racha
-    except Exception:
-        return 0
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — Reporte Clínico PDF
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_reporte:
-    st.header("📄 Reporte Clínico Semanal")
-    st.markdown(
-        "Genera un PDF descargable con el resumen de tu última semana: "
-        "pasos totales, gasto calórico con lastre y cumplimiento de protocolos."
-    )
-
-    nombre_reporte = st.text_input(
-        "Tu nombre (para el reporte)", value=st.session_state.nombre.capitalize()
-    )
-
-    if st.button("⚙️ Generar PDF"):
-        registros_sem = db.obtener_ultimos_registros(7)
-
-        if not registros_sem:
-            st.warning("No hay registros en los últimos 7 días para generar el reporte.")
-        else:
-            with st.spinner("Generando PDF..."):
-                pdf_bytes = generar_pdf_reporte(
-                    nombre=nombre_reporte,
-                    registros=registros_sem,
-                    peso_kg=peso_usuario_kg_sidebar,
-                )
-                st.download_button(
-                    label="📥 Descargar Reporte PDF",
-                    data=pdf_bytes,
-                    file_name=f"fit_engine_reporte_{date.today()}.pdf",
-                    mime="application/pdf",
-                )
-                st.success("✅ Reporte generado. Haz clic en el botón para descargarlo.")
-
-
 def generar_pdf_reporte(nombre: str, registros: list[dict], peso_kg: float) -> bytes:
-    """
-    Genera un PDF clínico con el resumen semanal usando fpdf2.
-    Retorna los bytes del PDF listo para descarga.
-    """
+    """Genera un PDF clínico con el resumen semanal usando fpdf2."""
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
 
-    # ── Encabezado ────────────────────────────────────────────────────────────
+    # Encabezado
     pdf.set_font("Helvetica", "B", 20)
-    pdf.set_text_color(39, 174, 96)      # verde
+    pdf.set_text_color(39, 174, 96)
     pdf.cell(0, 12, "Fit Engine Coach", ln=True, align="C")
-
     pdf.set_font("Helvetica", "", 12)
     pdf.set_text_color(80, 80, 80)
     pdf.cell(0, 8, "Reporte Clinico Semanal", ln=True, align="C")
     pdf.cell(0, 6, f"Generado el: {date.today().strftime('%d/%m/%Y')}", ln=True, align="C")
     pdf.cell(0, 6, f"Paciente / Usuario: {nombre}", ln=True, align="C")
     pdf.ln(8)
-
-    # ── Línea separadora ─────────────────────────────────────────────────────
     pdf.set_draw_color(39, 174, 96)
     pdf.set_line_width(0.8)
     pdf.line(10, pdf.get_y(), 200, pdf.get_y())
     pdf.ln(6)
 
-    # ── Calcular métricas agregadas ───────────────────────────────────────────
-    pasos_totales   = sum(r["pasos"] for r in registros)
-    dias_con_descanso = sum(1 for r in registros if r["protocol_rest"])
-    compliance_prom = sum(r["compliance_score"] for r in registros) / len(registros)
-    kcal_total      = sum(
+    # Métricas agregadas
+    pasos_totales     = sum(r["pasos"] for r in registros)
+    dias_descanso     = sum(1 for r in registros if r["protocol_rest"])
+    compliance_prom   = sum(r["compliance_score"] for r in registros) / len(registros)
+    kcal_total        = sum(
         db.calcular_calorias_con_lastre(
-            pasos=r["pasos"],
-            peso_usuario_kg=peso_kg,
+            pasos=r["pasos"], peso_usuario_kg=peso_kg,
             lastre_munecas_lb=r["lastre_munecas_lb"],
             lastre_tobillos_lb=r["lastre_tobillos_lb"],
             mins_ejercicio=r["minutos_ejercicio"],
@@ -592,21 +499,19 @@ def generar_pdf_reporte(nombre: str, registros: list[dict], peso_kg: float) -> b
     )
     dias_elite = sum(1 for r in registros if r["compliance_score"] >= 80)
 
-    # ── Resumen Ejecutivo ─────────────────────────────────────────────────────
+    # Resumen ejecutivo
     pdf.set_font("Helvetica", "B", 13)
     pdf.set_text_color(30, 30, 30)
     pdf.cell(0, 8, "Resumen Ejecutivo (ultimos 7 dias)", ln=True)
     pdf.ln(2)
-
     pdf.set_font("Helvetica", "", 11)
-    metricas = [
-        ("Pasos totales de la semana",          f"{pasos_totales:,}"),
-        ("Gasto calorico estimado con lastre",  f"{kcal_total:,.0f} kcal"),
-        ("Promedio de cumplimiento (Score)",    f"{compliance_prom:.1f} / 100"),
-        ("Dias de elite (score >= 80%)",        f"{dias_elite} de {len(registros)}"),
-        ("Dias con protocolo de descanso",      f"{dias_con_descanso} de {len(registros)}"),
-    ]
-    for label, valor in metricas:
+    for label, valor in [
+        ("Pasos totales de la semana",         f"{pasos_totales:,}"),
+        ("Gasto calorico estimado con lastre", f"{kcal_total:,.0f} kcal"),
+        ("Promedio de cumplimiento (Score)",   f"{compliance_prom:.1f} / 100"),
+        ("Dias de elite (score >= 80%)",       f"{dias_elite} de {len(registros)}"),
+        ("Dias con protocolo de descanso",     f"{dias_descanso} de {len(registros)}"),
+    ]:
         pdf.set_fill_color(245, 245, 245)
         pdf.cell(120, 8, label, border=0, fill=True)
         pdf.set_font("Helvetica", "B", 11)
@@ -614,44 +519,35 @@ def generar_pdf_reporte(nombre: str, registros: list[dict], peso_kg: float) -> b
         pdf.set_font("Helvetica", "", 11)
     pdf.ln(6)
 
-    # ── Tabla diaria ──────────────────────────────────────────────────────────
+    # Tabla diaria
     pdf.set_font("Helvetica", "B", 12)
     pdf.set_text_color(30, 30, 30)
     pdf.cell(0, 8, "Detalle Diario", ln=True)
     pdf.ln(2)
-
-    # Encabezados tabla
     headers = ["Fecha", "Pasos", "Min.", "Lastre M.", "Lastre T.", "Desc.", "Score"]
-    widths  = [30,       28,      18,     24,          24,          18,      28]
+    widths  = [30, 28, 18, 24, 24, 18, 28]
     pdf.set_font("Helvetica", "B", 9)
     pdf.set_fill_color(39, 174, 96)
     pdf.set_text_color(255, 255, 255)
     for h, w in zip(headers, widths):
         pdf.cell(w, 7, h, border=1, fill=True, align="C")
     pdf.ln()
-
     pdf.set_font("Helvetica", "", 9)
     for i, r in enumerate(reversed(registros)):
         fill = i % 2 == 0
         pdf.set_fill_color(250, 250, 250) if fill else pdf.set_fill_color(240, 240, 240)
         score = r["compliance_score"]
         pdf.set_text_color(39, 174, 96) if score >= 80 else pdf.set_text_color(192, 57, 43)
-        valores = [
-            r["fecha"],
-            f"{r['pasos']:,}",
-            str(r["minutos_ejercicio"]),
-            f"{r['lastre_munecas_lb']} lb",
-            f"{r['lastre_tobillos_lb']} lb",
-            "Si" if r["protocol_rest"] else "No",
-            f"{score:.0f}%",
-        ]
-        for val, w in zip(valores, widths):
+        for val, w in zip([
+            r["fecha"], f"{r['pasos']:,}", str(r["minutos_ejercicio"]),
+            f"{r['lastre_munecas_lb']} lb", f"{r['lastre_tobillos_lb']} lb",
+            "Si" if r["protocol_rest"] else "No", f"{score:.0f}%",
+        ], widths):
             pdf.cell(w, 6, val, border=1, fill=fill, align="C")
         pdf.ln()
-
     pdf.ln(8)
 
-    # ── Nota clínica de descargo ──────────────────────────────────────────────
+    # Descargo médico
     pdf.set_font("Helvetica", "I", 8)
     pdf.set_text_color(120, 120, 120)
     pdf.multi_cell(
@@ -660,6 +556,33 @@ def generar_pdf_reporte(nombre: str, registros: list[dict], peso_kg: float) -> b
         "y estilo de vida. No proporciona diagnosticos medicos, no prescribe tratamientos "
         "farmacologicos ni reemplaza la evaluacion de un profesional de la salud colegiado.",
     )
-
-    # Retornar bytes
     return bytes(pdf.output())
+
+
+with tab_reporte:
+    st.header("📄 Reporte Clínico Semanal")
+    st.markdown(
+        "Genera un **PDF descargable** con el resumen de tu última semana: "
+        "pasos totales, gasto calórico con lastre y cumplimiento de protocolos."
+    )
+    nombre_reporte = st.text_input(
+        "Tu nombre (para el reporte)", value=st.session_state.nombre.capitalize()
+    )
+    if st.button("⚙️ Generar PDF"):
+        registros_sem = db.obtener_ultimos_registros(7)
+        if not registros_sem:
+            st.warning("No hay registros en los últimos 7 días.")
+        else:
+            with st.spinner("Generando PDF..."):
+                pdf_bytes = generar_pdf_reporte(
+                    nombre=nombre_reporte,
+                    registros=registros_sem,
+                    peso_kg=peso_usuario_kg_sidebar,
+                )
+            st.download_button(
+                label="📥 Descargar Reporte PDF",
+                data=pdf_bytes,
+                file_name=f"fit_engine_reporte_{date.today()}.pdf",
+                mime="application/pdf",
+            )
+            st.success("✅ PDF listo. Haz clic arriba para descargarlo.")
