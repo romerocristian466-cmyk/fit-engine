@@ -18,6 +18,7 @@ def test_backend_pipeline():
     # 1. Crear Perfil Mock
     print("\n1. Creando Perfil Mock...")
     perfil_mock = PerfilUsuario(
+        nombre="Juan",
         edad=30,
         sexo="M",
         peso_kg=85.0,
