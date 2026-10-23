@@ -1,4 +1,13 @@
-﻿venv/
+# Entornos y caché de Python
+venv/
+.venv/
 __pycache__/
-.env
 *.pyc
+
+# Secretos y configuración local
+.env
+.streamlit/secrets.toml
+
+# Base de datos local (contiene datos personales de salud)
+fit_engine.db
+*.db

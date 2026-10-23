@@ -7,8 +7,15 @@ import sqlite3
 import os
 from datetime import date, datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 DB_PATH = os.getenv("FIT_ENGINE_DB", "fit_engine.db")
+ZONA_HORARIA = ZoneInfo("America/El_Salvador")
+
+
+def hoy() -> date:
+    """Fecha de hoy en El Salvador (el servidor de Streamlit Cloud corre en UTC)."""
+    return datetime.now(ZONA_HORARIA).date()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -92,7 +99,7 @@ def obtener_ultimos_registros(n: int = 7) -> list[dict]:
 
 def obtener_rango(dias: int = 30) -> list[dict]:
     """Devuelve registros de los últimos `dias` días."""
-    desde = str(date.today() - timedelta(days=dias))
+    desde = str(hoy() - timedelta(days=dias))
     with get_connection() as conn:
         rows = conn.execute(
             "SELECT * FROM actividad WHERE fecha >= ? ORDER BY fecha ASC", (desde,)
