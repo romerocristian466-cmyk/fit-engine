@@ -9,11 +9,11 @@ Coach de salud con IA para el control de peso y hábitos. Chatea con un coach (G
 | Pestaña | Para qué sirve |
 |---|---|
 | 💬 **Coach IA** | Chat de texto con un coach basado en "Solo por hoy" y Hábitos Atómicos. Incluye el **Escáner de Comida**: subes una foto del plato y Gemini estima ingredientes, gramos y calorías. |
-| 👟 **Mi Actividad** | Registro diario de pasos, minutos de ejercicio, lastre (muñecas y tobillos) y protocolo de descanso. Calcula un *score de cumplimiento* (0-100) y activa el **Modo Recuperación** si pasas 2 días seguidos sin descansar. |
-| 📊 **Dashboard** | Mapa de calor de cumplimiento, pasos diarios, gasto calórico estimado con lastre y racha de días consecutivos con score ≥ 80. |
+| 👟 **Mi Actividad** | Registro diario de pasos, minutos de ejercicio, lastre (muñecas y tobillos) y protocolo de descanso. Calcula un *score de cumplimiento* (0-100) y activa el **Modo Recuperación** si pasas 2 días seguidos sin descansar. También registras tu **peso corporal**. |
+| 📊 **Dashboard** | Mapa de calor de cumplimiento, pasos diarios, gasto calórico estimado con lastre, racha de días consecutivos con score ≥ 80 y **gráfica de peso con línea de tendencia y meta**. |
 | 📄 **Reporte Clínico** | Genera un PDF descargable con el resumen de tus últimos 7 días. |
 
-En la barra lateral pones tu nombre, tu peso y tus pesas de lastre.
+En la barra lateral pones tu nombre, tu peso (por defecto, el último que registraste), tu meta de peso y tus pesas de lastre.
 
 ## Cómo correrla en tu computadora
 
@@ -58,7 +58,7 @@ Se abre en <http://localhost:8501>.
 | Archivo | Función |
 |---|---|
 | `app.py` | Interfaz de Streamlit (las 4 pestañas) |
-| `db.py` | Base de datos SQLite, zona horaria y cálculo de calorías con lastre |
+| `db.py` | Base de datos SQLite (actividad y peso), zona horaria y cálculo de calorías con lastre |
 | `vision_service.py` | Análisis de fotos de comida con Gemini |
 | `metabolic_engine.py` | Cálculo de TMB, calorías y macros (Mifflin-St Jeor) |
 | `schemas.py` | Modelos de datos (Pydantic) |

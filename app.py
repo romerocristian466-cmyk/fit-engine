@@ -53,10 +53,24 @@ lastre_tobillos_lb_sidebar = st.sidebar.number_input(
     help="Los tobillos tienen mayor impacto biomecánico (×1.5).",
     key="lastre_tobillos_sidebar",
 )
+# El valor inicial se fija una sola vez en la sesión (sin `value=`), porque el
+# formulario de peso lo vuelve a modificar desde un callback.
+if "peso_usuario_sidebar" not in st.session_state:
+    _ultimo_peso = db.obtener_ultimo_peso()
+    st.session_state["peso_usuario_sidebar"] = (
+        min(max(_ultimo_peso, 30.0), 200.0) if _ultimo_peso else 70.0
+    )
 peso_usuario_kg_sidebar = st.sidebar.number_input(
     "Tu peso corporal (kg)",
-    min_value=30.0, max_value=200.0, value=70.0, step=0.5,
+    min_value=30.0, max_value=200.0, step=0.5,
+    help="Por defecto es tu último peso registrado.",
     key="peso_usuario_sidebar",
+)
+meta_peso_kg = st.sidebar.number_input(
+    "Meta de peso (kg)",
+    min_value=0.0, max_value=200.0, value=0.0, step=0.5,
+    help="Opcional. Si la pones, aparece como línea en la gráfica de peso. 0 = sin meta.",
+    key="meta_peso_sidebar",
 )
 
 st.sidebar.markdown("---")
@@ -155,6 +169,27 @@ def _racha(df: "pd.DataFrame") -> int:
         return racha
     except Exception:
         return 0
+
+
+def _tendencia_lineal(xs: list[float], ys: list[float]) -> tuple[float, float]:
+    """Recta de mínimos cuadrados y = m·x + b. Requiere al menos 2 valores de x distintos."""
+    n = len(xs)
+    mx, my = sum(xs) / n, sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    m = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+    return m, my - m * mx
+
+
+def _guardar_peso_cb() -> None:
+    """Callback del formulario de peso: guarda y sincroniza el peso del sidebar."""
+    fecha_p = st.session_state["peso_form_fecha"]
+    peso_p = float(st.session_state["peso_form_kg"])
+    db.guardar_peso(fecha_p, peso_p)
+    ultimo = db.obtener_ultimo_peso()
+    if ultimo is not None:
+        # Un callback corre antes de redibujar, por eso sí puede cambiar el widget del sidebar
+        st.session_state["peso_usuario_sidebar"] = min(max(ultimo, 30.0), 200.0)
+    st.session_state["_peso_guardado_msg"] = (fecha_p, peso_p)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -356,6 +391,26 @@ with tab_actividad:
     else:
         st.info("Aún no hay registros. ¡Guarda tu primer día!")
 
+    # ── Peso corporal ────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("⚖️ Peso corporal")
+    with st.form("form_peso"):
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            st.date_input("Fecha", value=db.hoy(), max_value=db.hoy(), key="peso_form_fecha")
+        with col_p2:
+            st.number_input(
+                "Peso (kg)", min_value=30.0, max_value=200.0,
+                value=float(peso_usuario_kg_sidebar), step=0.1, key="peso_form_kg",
+            )
+        st.form_submit_button(
+            "💾 Guardar peso", on_click=_guardar_peso_cb, key="btn_guardar_peso"
+        )
+    st.caption("Si registras una fecha que ya existe, se reemplaza el peso de ese día.")
+    _msg_peso = st.session_state.pop("_peso_guardado_msg", None)
+    if _msg_peso:
+        st.success(f"✅ Peso guardado — **{_msg_peso[1]:.1f} kg** ({_msg_peso[0]})")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — Dashboard con Mapa de Calor de Cumplimiento
@@ -474,6 +529,71 @@ with tab_dashboard:
             font=dict(color="#e0e0e0"),
         )
         st.plotly_chart(fig_kcal, use_container_width=True)
+
+    # ── Peso corporal: tendencia y meta ──────────────────────────────────────
+    st.divider()
+    st.subheader("⚖️ Peso corporal")
+    pesos = db.obtener_pesos(dias=180)
+    if not pesos:
+        st.info("Aún no hay pesos registrados. Agrégalos en la pestaña 👟, sección Peso corporal.")
+    else:
+        df_peso = pd.DataFrame(pesos)
+        df_peso["fecha"] = pd.to_datetime(df_peso["fecha"])
+        primera, ultima = df_peso["fecha"].iloc[0], df_peso["fecha"].iloc[-1]
+        peso_primero = float(df_peso["peso_kg"].iloc[0])
+        peso_actual  = float(df_peso["peso_kg"].iloc[-1])
+
+        fig_peso = go.Figure()
+        fig_peso.add_trace(go.Scatter(
+            x=df_peso["fecha"], y=df_peso["peso_kg"],
+            mode="lines+markers",
+            line=dict(color="#9b59b6", width=2),
+            marker=dict(size=7),
+            name="Peso",
+        ))
+
+        pendiente_semana = None
+        if len(df_peso) >= 3:
+            xs = [float(d) for d in (df_peso["fecha"] - primera).dt.days]
+            ys = [float(p) for p in df_peso["peso_kg"]]
+            m, b = _tendencia_lineal(xs, ys)
+            fig_peso.add_trace(go.Scatter(
+                x=[primera, ultima], y=[b, m * xs[-1] + b],
+                mode="lines",
+                line=dict(color="#f1c40f", width=2, dash="dot"),
+                name="Tendencia",
+            ))
+            if xs[-1] >= 7:   # con menos de una semana de datos, el ritmo semanal engaña
+                pendiente_semana = m * 7
+
+        if meta_peso_kg > 0:
+            # Como línea (no add_hline) para que el eje Y siempre incluya la meta
+            fig_peso.add_trace(go.Scatter(
+                x=[primera, ultima], y=[meta_peso_kg, meta_peso_kg],
+                mode="lines",
+                line=dict(color="#27ae60", width=2, dash="dash"),
+                name=f"Meta {meta_peso_kg:g} kg",
+            ))
+
+        fig_peso.update_layout(
+            height=300,
+            margin=dict(l=20, r=20, t=30, b=30),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#e0e0e0"),
+            yaxis=dict(title="kg"),
+            legend=dict(orientation="h", y=1.15),
+        )
+        st.plotly_chart(fig_peso, width="stretch")
+
+        resumen = [
+            f"Peso actual: **{peso_actual:.1f} kg**",
+            f"Cambio desde el primer registro: **{peso_actual - peso_primero:+.1f} kg**",
+        ]
+        if pendiente_semana is not None:
+            resumen.append(f"Tendencia: **{pendiente_semana:+.2f} kg/semana**")
+        if meta_peso_kg > 0:
+            resumen.append(f"Faltan **{abs(peso_actual - meta_peso_kg):.1f} kg** para tu meta")
+        st.markdown(" · ".join(resumen))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
