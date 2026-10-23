@@ -45,6 +45,13 @@ def init_db() -> None:
                 notas               TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS peso (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha    TEXT    NOT NULL UNIQUE,
+                peso_kg  REAL    NOT NULL
+            )
+        """)
         conn.commit()
 
 
@@ -105,6 +112,45 @@ def obtener_rango(dias: int = 30) -> list[dict]:
             "SELECT * FROM actividad WHERE fecha >= ? ORDER BY fecha ASC", (desde,)
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Peso corporal
+# ──────────────────────────────────────────────────────────────────────────────
+
+def guardar_peso(fecha: date, peso_kg: float) -> None:
+    """Inserta o actualiza el peso del día."""
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO peso (fecha, peso_kg) VALUES (?, ?)
+            ON CONFLICT(fecha) DO UPDATE SET peso_kg = excluded.peso_kg
+        """, (str(fecha), float(peso_kg)))
+        conn.commit()
+
+
+def obtener_pesos(dias: Optional[int] = None) -> list[dict]:
+    """Pesos ordenados por fecha ASC. Con `dias`, solo los de los últimos `dias` días."""
+    with get_connection() as conn:
+        if dias is None:
+            rows = conn.execute(
+                "SELECT fecha, peso_kg FROM peso ORDER BY fecha ASC"
+            ).fetchall()
+        else:
+            desde = str(hoy() - timedelta(days=dias))
+            rows = conn.execute(
+                "SELECT fecha, peso_kg FROM peso WHERE fecha >= ? ORDER BY fecha ASC",
+                (desde,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def obtener_ultimo_peso() -> Optional[float]:
+    """Peso del registro más reciente por FECHA (no por orden de captura), o None."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT peso_kg FROM peso ORDER BY fecha DESC LIMIT 1"
+        ).fetchone()
+    return float(row["peso_kg"]) if row else None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
