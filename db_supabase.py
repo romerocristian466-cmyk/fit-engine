@@ -125,6 +125,15 @@ def sesion_actual(cliente):
         return None
 
 
+def restaurar_sesion(cliente, refresh_token: str):
+    """Sesión nueva a partir del refresh token guardado en el navegador, o None."""
+    try:
+        return cliente.auth.refresh_session(refresh_token).session
+    except Exception as e:
+        print(f"[auth] no se pudo restaurar la sesión: {type(e).__name__}")
+        return None
+
+
 def cerrar_sesion(cliente) -> None:
     if cliente is None:
         return
