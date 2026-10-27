@@ -15,12 +15,12 @@ from google import genai
 import vision_service
 import metabolic_engine
 import db
+import db_supabase
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Arranque
 # ──────────────────────────────────────────────────────────────────────────────
 dotenv.load_dotenv()
-db.init_db()
 
 # Sincronizar st.secrets → os.environ (Streamlit Cloud)
 try:
@@ -35,8 +35,125 @@ except Exception:
 st.set_page_config(page_title="Fit Engine Coach", layout="centered")
 st.title("🍏 Fit Engine Coach")
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Acceso: modo local (SQLite, sin login) o nube (Supabase + login por usuario)
+# ──────────────────────────────────────────────────────────────────────────────
+# El MODO LOCAL existe solo para desarrollar en tu computadora y se activa con
+# FIT_ENGINE_MODO_LOCAL=1. Sin esa variable la app EXIGE Supabase y login, así nunca
+# cae por accidente en una base de datos compartida entre todos los visitantes.
+MODO_LOCAL = os.getenv("FIT_ENGINE_MODO_LOCAL") == "1"
+
+
+def _repo():
+    """Repositorio de datos de ESTA sesión (nunca compartido entre usuarios)."""
+    return db if MODO_LOCAL else st.session_state["sb_repo"]
+
+
+def _cerrar_sesion() -> None:
+    db_supabase.cerrar_sesion(st.session_state.get("sb_cliente"))
+    # Se borra TODO el estado (chat, nombre, peso, formularios): nada pasa al siguiente usuario
+    st.session_state.clear()
+
+
+def _guardar_perfil_cb() -> None:
+    """Callback: guarda nombre y meta de peso cuando el usuario los cambia."""
+    nombre = (st.session_state.get("nombre") or "").strip()[:60] or None
+    meta = float(st.session_state.get("meta_peso_sidebar") or 0.0)
+    _repo().guardar_perfil(nombre, meta)
+
+
+def _acceder(url: str, key: str, accion: str, email: str, clave: str) -> None:
+    """Intenta iniciar sesión o crear la cuenta; si funciona, entra a la app."""
+    cliente = db_supabase.crear_cliente(url, key)   # un cliente nuevo por sesión
+    try:
+        if accion == "entrar":
+            db_supabase.iniciar_sesion(cliente, email, clave)
+        elif not db_supabase.registrar(cliente, email, clave):
+            st.success("Cuenta creada ✅ Revisa tu correo para confirmarla y luego inicia sesión.")
+            return
+    except db_supabase.ErrorAcceso as e:
+        st.error(str(e))
+        return
+    sesion = db_supabase.sesion_actual(cliente)
+    if sesion is None:
+        st.error("No se pudo iniciar la sesión. Inténtalo de nuevo.")
+        return
+    st.session_state["sb_cliente"] = cliente
+    st.session_state["sb_repo"] = db_supabase.RepoSupabase(cliente, sesion.user.id)
+    st.rerun()
+
+
+def _pantalla_acceso(url: str, key: str) -> None:
+    st.subheader("Bienvenido 👋")
+    st.caption("Inicia sesión o crea tu cuenta para guardar tu progreso. Solo tú ves tus datos.")
+    tab_entrar, tab_crear = st.tabs(["Iniciar sesión", "Crear cuenta"])
+
+    with tab_entrar:
+        with st.form("form_login"):
+            email = st.text_input("Correo", key="login_email")
+            clave = st.text_input("Contraseña", type="password", key="login_clave")
+            enviar = st.form_submit_button("Entrar", key="btn_entrar")
+        if enviar:
+            _acceder(url, key, "entrar", email, clave)
+
+    with tab_crear:
+        with st.form("form_registro"):
+            email_r = st.text_input("Correo", key="reg_email")
+            clave_r = st.text_input("Contraseña (mínimo 8 caracteres)", type="password", key="reg_clave")
+            clave_r2 = st.text_input("Repite la contraseña", type="password", key="reg_clave2")
+            enviar_r = st.form_submit_button("Crear cuenta", key="btn_crear")
+        if enviar_r:
+            if clave_r != clave_r2:
+                st.error("Las contraseñas no coinciden.")
+            else:
+                _acceder(url, key, "crear", email_r, clave_r)
+
+    st.caption(
+        "Al usar el coach y el escáner de comida, tus mensajes y fotos se envían a "
+        "Google Gemini para generar las respuestas."
+    )
+
+
+if MODO_LOCAL:
+    db.init_db()
+    email_sesion = None
+else:
+    _url, _key = os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY")
+    if not _url or not _key:
+        st.error(
+            "Falta configurar Supabase: agrega SUPABASE_URL y SUPABASE_KEY en los "
+            "Secrets de la app."
+        )
+        st.stop()
+    _sesion = db_supabase.sesion_actual(st.session_state.get("sb_cliente"))
+    if _sesion is None:
+        if "sb_cliente" in st.session_state:
+            st.session_state.clear()   # la sesión venció o se cerró: no se arrastra nada
+        _pantalla_acceso(_url, _key)
+        st.stop()
+    email_sesion = _sesion.user.email
+
+# Perfil guardado (nombre y meta de peso): se carga una sola vez por sesión
+if "_perfil_cargado" not in st.session_state:
+    _perfil = _repo().obtener_perfil()
+    st.session_state["nombre"] = _perfil.get("nombre") or ""
+    st.session_state["meta_peso_sidebar"] = min(
+        max(float(_perfil.get("meta_peso_kg") or 0.0), 0.0), 200.0
+    )
+    st.session_state["_perfil_cargado"] = True
+
+if not MODO_LOCAL:
+    st.sidebar.caption(f"Sesión: **{email_sesion}**")
+    if st.sidebar.button("Cerrar sesión", key="btn_cerrar_sesion"):
+        _cerrar_sesion()
+        st.rerun()
+    st.sidebar.markdown("---")
+
 st.sidebar.subheader("👤 Tu perfil")
-st.sidebar.text_input("Tu nombre", key="nombre", placeholder="¿Cómo te llamas?")
+st.sidebar.text_input(
+    "Tu nombre", key="nombre", placeholder="¿Cómo te llamas?",
+    max_chars=60, on_change=_guardar_perfil_cb,
+)
 nombre_usuario = (st.session_state.get("nombre") or "").strip() or "amigo"
 
 st.sidebar.markdown("---")
@@ -56,7 +173,7 @@ lastre_tobillos_lb_sidebar = st.sidebar.number_input(
 # El valor inicial se fija una sola vez en la sesión (sin `value=`), porque el
 # formulario de peso lo vuelve a modificar desde un callback.
 if "peso_usuario_sidebar" not in st.session_state:
-    _ultimo_peso = db.obtener_ultimo_peso()
+    _ultimo_peso = _repo().obtener_ultimo_peso()
     st.session_state["peso_usuario_sidebar"] = (
         min(max(_ultimo_peso, 30.0), 200.0) if _ultimo_peso else 70.0
     )
@@ -68,9 +185,10 @@ peso_usuario_kg_sidebar = st.sidebar.number_input(
 )
 meta_peso_kg = st.sidebar.number_input(
     "Meta de peso (kg)",
-    min_value=0.0, max_value=200.0, value=0.0, step=0.5,
+    min_value=0.0, max_value=200.0, step=0.5,
     help="Opcional. Si la pones, aparece como línea en la gráfica de peso. 0 = sin meta.",
     key="meta_peso_sidebar",
+    on_change=_guardar_perfil_cb,
 )
 
 st.sidebar.markdown("---")
@@ -184,8 +302,8 @@ def _guardar_peso_cb() -> None:
     """Callback del formulario de peso: guarda y sincroniza el peso del sidebar."""
     fecha_p = st.session_state["peso_form_fecha"]
     peso_p = float(st.session_state["peso_form_kg"])
-    db.guardar_peso(fecha_p, peso_p)
-    ultimo = db.obtener_ultimo_peso()
+    _repo().guardar_peso(fecha_p, peso_p)
+    ultimo = _repo().obtener_ultimo_peso()
     if ultimo is not None:
         # Un callback corre antes de redibujar, por eso sí puede cambiar el widget del sidebar
         st.session_state["peso_usuario_sidebar"] = min(max(ultimo, 30.0), 200.0)
@@ -276,7 +394,7 @@ with tab_actividad:
     st.header("👟 Registro de Actividad Física")
 
     # ── Ajuste Metabólico Proactivo ──────────────────────────────────────────
-    modo_recuperacion   = db.necesita_ajuste_recuperacion()
+    modo_recuperacion   = _repo().necesita_ajuste_recuperacion()
     META_PASOS_DEFAULT  = 8000
 
     if modo_recuperacion:
@@ -305,12 +423,14 @@ with tab_actividad:
     with st.form("form_actividad"):
         fecha          = st.date_input("Fecha", value=db.hoy())
         pasos          = st.number_input(
-            "Pasos registrados en el día", min_value=0, step=500, value=0
+            "Pasos registrados en el día", min_value=0, max_value=200000, step=500, value=0
         )
         mins_ejercicio = st.number_input(
-            "Minutos de ejercicio", min_value=0, step=15, value=0
+            "Minutos de ejercicio", min_value=0, max_value=1440, step=15, value=0
         )
-        tipo           = st.text_input("Tipo de ejercicio", value="Caminata / Cardio")
+        tipo           = st.text_input(
+            "Tipo de ejercicio", value="Caminata / Cardio", max_chars=100
+        )
 
         col_a, col_b = st.columns(2)
         with col_a:
@@ -331,7 +451,8 @@ with tab_actividad:
             value=False,
         )
         notas = st.text_area(
-            "Notas opcionales", height=80, placeholder="¿Cómo te sentiste hoy?"
+            "Notas opcionales", height=80, placeholder="¿Cómo te sentiste hoy?",
+            max_chars=2000,
         )
 
         submitted = st.form_submit_button("💾 Guardar Registro")
@@ -347,7 +468,7 @@ with tab_actividad:
             lastre_tobillos_lb=lastre_tobillos,
             mins_ejercicio=mins_ejercicio,
         )
-        db.guardar_registro(
+        _repo().guardar_registro(
             fecha=fecha,
             pasos=pasos,
             minutos_ejercicio=mins_ejercicio,
@@ -373,7 +494,7 @@ with tab_actividad:
     # ── Historial reciente ───────────────────────────────────────────────────
     st.divider()
     st.subheader("📋 Últimos 7 días")
-    registros = db.obtener_ultimos_registros(7)
+    registros = _repo().obtener_ultimos_registros(7)
     if registros:
         st.dataframe(
             registros,
@@ -418,7 +539,7 @@ with tab_actividad:
 with tab_dashboard:
     st.header("📊 Dashboard de Progreso")
 
-    registros_90 = db.obtener_rango(dias=90)
+    registros_90 = _repo().obtener_rango(dias=90)
 
     if not registros_90:
         st.info("Aún no hay registros. Empieza a registrar en la pestaña 👟.")
@@ -533,7 +654,7 @@ with tab_dashboard:
     # ── Peso corporal: tendencia y meta ──────────────────────────────────────
     st.divider()
     st.subheader("⚖️ Peso corporal")
-    pesos = db.obtener_pesos(dias=180)
+    pesos = _repo().obtener_pesos(dias=180)
     if not pesos:
         st.info("Aún no hay pesos registrados. Agrégalos en la pestaña 👟, sección Peso corporal.")
     else:
@@ -705,7 +826,7 @@ with tab_reporte:
         "Tu nombre (para el reporte)", value=nombre_usuario
     )
     if st.button("⚙️ Generar PDF"):
-        registros_sem = db.obtener_ultimos_registros(7)
+        registros_sem = _repo().obtener_ultimos_registros(7)
         if not registros_sem:
             st.warning("No hay registros en los últimos 7 días.")
         else:

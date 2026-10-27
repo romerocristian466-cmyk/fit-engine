@@ -52,6 +52,13 @@ def init_db() -> None:
                 peso_kg  REAL    NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS perfil (
+                id            INTEGER PRIMARY KEY CHECK (id = 1),   -- una sola fila
+                nombre        TEXT,
+                meta_peso_kg  REAL
+            )
+        """)
         conn.commit()
 
 
@@ -154,18 +161,50 @@ def obtener_ultimo_peso() -> Optional[float]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Perfil (nombre y meta de peso)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def obtener_perfil() -> dict:
+    """Devuelve {'nombre': ..., 'meta_peso_kg': ...} o {} si aún no hay perfil."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT nombre, meta_peso_kg FROM perfil WHERE id = 1"
+        ).fetchone()
+    return dict(row) if row else {}
+
+
+def guardar_perfil(nombre: Optional[str], meta_peso_kg: Optional[float]) -> None:
+    """Inserta o actualiza el perfil."""
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO perfil (id, nombre, meta_peso_kg) VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                nombre       = excluded.nombre,
+                meta_peso_kg = excluded.meta_peso_kg
+        """, (nombre, meta_peso_kg))
+        conn.commit()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Lógica de Ajuste Metabólico Proactivo
 # ──────────────────────────────────────────────────────────────────────────────
+
+def debe_recuperar(registros: list[dict]) -> bool:
+    """
+    True si los 2 registros más recientes (orden DESC) no tienen protocolo de descanso.
+    Es una función pura: sirve igual para SQLite y para Supabase.
+    """
+    if len(registros) < 2:
+        return False
+    return all(not r["protocol_rest"] for r in registros[:2])
+
 
 def necesita_ajuste_recuperacion() -> bool:
     """
     Retorna True si los últimos 2 registros tienen protocol_rest == 0
     (el usuario no ha descansado en los últimos 2 días registrados).
     """
-    registros = obtener_ultimos_registros(n=2)
-    if len(registros) < 2:
-        return False
-    return all(r["protocol_rest"] == 0 for r in registros)
+    return debe_recuperar(obtener_ultimos_registros(n=2))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
