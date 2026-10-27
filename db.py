@@ -59,7 +59,41 @@ def init_db() -> None:
                 meta_peso_kg  REAL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS uso_ia (
+                fecha  TEXT    NOT NULL,
+                tipo   TEXT    NOT NULL,
+                usos   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (fecha, tipo)
+            )
+        """)
         conn.commit()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Límite diario de uso de la IA (debe coincidir con la función consumir_cuota del SQL)
+# ──────────────────────────────────────────────────────────────────────────────
+LIMITES_DIARIOS = {"chat": 30, "foto": 5}
+
+
+def consumir_cuota(tipo: str) -> tuple[bool, int, int]:
+    """Cuenta un uso de IA de hoy. Devuelve (permitido, usados, limite)."""
+    limite = LIMITES_DIARIOS[tipo]
+    hoy_s = str(hoy())
+    with get_connection() as conn:
+        fila = conn.execute(
+            "SELECT usos FROM uso_ia WHERE fecha = ? AND tipo = ?", (hoy_s, tipo)
+        ).fetchone()
+        usos = fila[0] if fila else 0
+        if usos >= limite:
+            return False, usos, limite
+        conn.execute(
+            "INSERT INTO uso_ia (fecha, tipo, usos) VALUES (?, ?, 1) "
+            "ON CONFLICT (fecha, tipo) DO UPDATE SET usos = usos + 1",
+            (hoy_s, tipo),
+        )
+        conn.commit()
+        return True, usos + 1, limite
 
 
 # ──────────────────────────────────────────────────────────────────────────────

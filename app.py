@@ -265,6 +265,21 @@ def obtener_respuesta_coach(historial: list[dict]) -> str:
         return "⚠️ No pude conectar con el coach, intenta de nuevo."
 
 
+def _cuota_ia(tipo: str) -> tuple[bool, str]:
+    """Descuenta un uso diario de IA. Devuelve (puede_continuar, mensaje_para_el_usuario).
+
+    Si no se puede verificar el límite, NO se llama a Gemini (falla cerrado)."""
+    try:
+        permitido, usados, limite = _repo().consumir_cuota(tipo)
+    except Exception:
+        return False, "⚠️ No pude verificar tu límite diario. Inténtalo de nuevo en un momento."
+    nombre = "mensajes al coach" if tipo == "chat" else "fotos analizadas"
+    if not permitido:
+        return False, (f"Llegaste al límite de hoy ({limite} {nombre}). "
+                       "Se reinicia mañana. ¡Gracias por entender! 🙏")
+    return True, f"Hoy llevas {usados} de {limite} {nombre}."
+
+
 def calcular_compliance(pasos: int, meta: int, minutos: int, protocol_rest: bool) -> float:
     """Score 0-100 basado en cumplimiento de pasos, ejercicio y descanso."""
     score_pasos     = min(pasos / meta, 1.0) * 50.0
@@ -340,13 +355,19 @@ with tab_chat:
         with st.chat_message("user"):
             st.write(prompt)
 
-        # Obtener y mostrar respuesta del coach
-        with st.spinner("El coach está pensando..."):
-            respuesta = obtener_respuesta_coach(st.session_state.historial_chat)
+        # Obtener y mostrar respuesta del coach (respetando el límite diario)
+        puede, aviso_cuota = _cuota_ia("chat")
+        if puede:
+            with st.spinner("El coach está pensando..."):
+                respuesta = obtener_respuesta_coach(st.session_state.historial_chat)
+        else:
+            respuesta = aviso_cuota
 
         st.session_state.historial_chat.append({"role": "assistant", "content": respuesta})
         with st.chat_message("assistant"):
             st.write(respuesta)
+        if puede:
+            st.caption(aviso_cuota)
 
     # ── Botón para limpiar el chat ───────────────────────────────────────────
     if len(st.session_state.historial_chat) > 1:
@@ -371,20 +392,27 @@ with tab_chat:
         "Sube una foto de tu plato", type=["jpg", "jpeg", "png"]
     )
     if uploaded_file is not None:
-        st.image(uploaded_file, caption="Plato a analizar", use_container_width=True)
+        st.image(uploaded_file, caption="Plato a analizar", width="stretch")
         if st.button("🔍 Analizar Plato"):
-            with st.spinner("Analizando con Gemini Vision..."):
-                try:
-                    analisis = vision_service.analizar_imagen_comida(
-                        uploaded_file.getvalue(),
-                        nombre_usuario=nombre_usuario,
-                    )
-                    st.info(f"**Mensaje del Coach:**\n\n{analisis.mensaje_coach}")
-                    st.write("### Desglose Nutricional")
-                    st.write(f"**Calorías Totales:** {analisis.calorias_totales} kcal")
-                    st.json([ing.model_dump() for ing in analisis.ingredientes])
-                except Exception as e:
-                    st.error(f"Error procesando imagen: {e}")
+            puede_foto, aviso_foto = _cuota_ia("foto")
+            if not puede_foto:
+                st.warning(aviso_foto)
+            else:
+                st.caption(aviso_foto)
+                with st.spinner("Analizando con Gemini Vision..."):
+                    try:
+                        analisis = vision_service.analizar_imagen_comida(
+                            uploaded_file.getvalue(),
+                            nombre_usuario=nombre_usuario,
+                        )
+                        st.info(f"**Mensaje del Coach:**\n\n{analisis.mensaje_coach}")
+                        st.write("### Desglose Nutricional")
+                        st.write(f"**Calorías Totales:** {analisis.calorias_totales} kcal")
+                        st.json([ing.model_dump() for ing in analisis.ingredientes])
+                    except Exception as e:
+                        # El detalle técnico solo va al log del servidor
+                        print(f"[vision] Error: {type(e).__name__}: {e}")
+                        st.error("No pude analizar la imagen. Inténtalo de nuevo con otra foto.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -507,7 +535,7 @@ with tab_actividad:
                 "protocol_rest":      st.column_config.CheckboxColumn("Descanso"),
             },
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
         )
     else:
         st.info("Aún no hay registros. ¡Guarda tu primer día!")
@@ -547,7 +575,7 @@ with tab_dashboard:
         df = pd.DataFrame(registros_90)
         df["fecha"]      = pd.to_datetime(df["fecha"])
         df["semana"]     = df["fecha"].dt.isocalendar().week.astype(int)
-        df["dia_semana"] = df["fecha"].dt.dayofweek   # 0=Lun … 6=Dom
+        df["dia_semana"] = df["fecha"].dt.day_of_week   # 0=Lun … 6=Dom
 
         # ── KPIs rápidos ──────────────────────────────────────────────────
         col1, col2, col3, col4 = st.columns(4)
@@ -599,7 +627,7 @@ with tab_dashboard:
             font=dict(color="#e0e0e0"),
             xaxis=dict(side="top"),
         )
-        st.plotly_chart(fig_heat, use_container_width=True)
+        st.plotly_chart(fig_heat, width="stretch")
 
         st.divider()
 
@@ -623,7 +651,7 @@ with tab_dashboard:
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#e0e0e0"),
         )
-        st.plotly_chart(fig_pasos, use_container_width=True)
+        st.plotly_chart(fig_pasos, width="stretch")
 
         st.divider()
 
@@ -649,7 +677,7 @@ with tab_dashboard:
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#e0e0e0"),
         )
-        st.plotly_chart(fig_kcal, use_container_width=True)
+        st.plotly_chart(fig_kcal, width="stretch")
 
     # ── Peso corporal: tendencia y meta ──────────────────────────────────────
     st.divider()
