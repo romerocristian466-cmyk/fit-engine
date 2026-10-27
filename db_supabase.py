@@ -165,6 +165,18 @@ class RepoSupabase:
     def init_db(self) -> None:
         """El esquema se crea una vez con supabase_schema.sql; aquí no hay nada que hacer."""
 
+    # ── Límite diario de IA ─────────────────────────────────────────────────
+    def consumir_cuota(self, tipo: str) -> tuple[bool, int, int]:
+        """Cuenta un uso de IA de hoy. Devuelve (permitido, usados, limite).
+
+        La cuenta la lleva la base de datos (función atómica); si falla, se lanza
+        ErrorDatos y la app NO llama a Gemini (falla cerrado)."""
+        def _rpc():
+            r = self._c.rpc("consumir_cuota", {"p_tipo": tipo}).execute().data
+            fila = r[0] if isinstance(r, list) else r
+            return bool(fila["permitido"]), int(fila["usados"]), int(fila["limite"])
+        return self._ejecutar("verificar tu límite diario", _rpc)
+
     # ── Actividad ───────────────────────────────────────────────────────────
     def guardar_registro(
         self, fecha, pasos, minutos_ejercicio, tipo_ejercicio,

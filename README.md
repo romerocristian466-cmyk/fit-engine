@@ -69,7 +69,10 @@ Se abre en <http://localhost:8501>.
    SUPABASE_KEY   = "tu_llave_publica"
    ```
 
+**Actualizar una base que ya tenías:** si ya habías corrido `supabase_schema.sql` antes, vuelve a pegarlo y ejecutarlo completo (es seguro, no borra datos). Agrega el límite diario de IA.
+
 Notas:
+- **Límite diario de IA por usuario:** 30 mensajes al coach y 5 fotos analizadas al día (hora de El Salvador). Para cambiarlo, edita los números en la función `consumir_cuota` de `supabase_schema.sql` (y `LIMITES_DIARIOS` en `db.py` para el modo local) y vuelve a ejecutar el SQL.
 - El plan gratis de Supabase puede **pausar** proyectos con poca actividad durante 7 días; se reactivan desde su panel.
 - Si cierras o recargas la página, hay que volver a iniciar sesión.
 
