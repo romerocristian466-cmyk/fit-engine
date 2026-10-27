@@ -74,7 +74,7 @@ Se abre en <http://localhost:8501>.
 Notas:
 - **Límite diario de IA por usuario:** 30 mensajes al coach y 5 fotos analizadas al día (hora de El Salvador). Para cambiarlo, edita los números en la función `consumir_cuota` de `supabase_schema.sql` (y `LIMITES_DIARIOS` en `db.py` para el modo local) y vuelve a ejecutar el SQL.
 - El plan gratis de Supabase puede **pausar** proyectos con poca actividad durante 7 días; se reactivan desde su panel.
-- Si cierras o recargas la página, hay que volver a iniciar sesión.
+- **La sesión sobrevive a recargar la página** (14 días): el navegador guarda una cookie con el token de renovación de Supabase (nunca la contraseña). Al cerrar sesión se borra y el token se revoca en todos tus dispositivos. Ver `sesion_cookie.py`.
 
 ## Privacidad y seguridad
 
@@ -90,6 +90,7 @@ Notas:
 | `app.py` | Interfaz de Streamlit (las 4 pestañas) |
 | `db.py` | Modo local: base SQLite (actividad, peso y perfil). También la zona horaria y el cálculo de calorías con lastre |
 | `db_supabase.py` | Modo nube: login y acceso a Supabase, un cliente por sesión |
+| `sesion_cookie.py` | Mantiene la sesión al recargar la página (cookie con el token de renovación) |
 | `supabase_schema.sql` | Tablas y reglas de seguridad (RLS) para pegar en Supabase |
 | `vision_service.py` | Análisis de fotos de comida con Gemini |
 | `metabolic_engine.py` | Cálculo de TMB, calorías y macros (Mifflin-St Jeor) |

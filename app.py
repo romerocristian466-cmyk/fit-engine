@@ -16,6 +16,7 @@ import vision_service
 import metabolic_engine
 import db
 import db_supabase
+import sesion_cookie
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Arranque
@@ -51,8 +52,16 @@ def _repo():
 
 def _cerrar_sesion() -> None:
     db_supabase.cerrar_sesion(st.session_state.get("sb_cliente"))
-    # Se borra TODO el estado (chat, nombre, peso, formularios): nada pasa al siguiente usuario
+    _limpiar_estado()
+
+
+def _limpiar_estado() -> None:
+    """Borra TODO el estado (chat, nombre, peso, formularios): nada pasa al siguiente usuario.
+    Además marca que hay que borrar la cookie y que NO se debe restaurar la sesión con la
+    cookie vieja que el navegador aún mandó en esta conexión."""
     st.session_state.clear()
+    st.session_state["_cookie_revisada"] = True
+    st.session_state["_borrar_cookie"] = True
 
 
 def _guardar_perfil_cb() -> None:
@@ -126,12 +135,32 @@ else:
         )
         st.stop()
     _sesion = db_supabase.sesion_actual(st.session_state.get("sb_cliente"))
+    # Recarga de la página (F5): intenta recuperar la sesión con la cookie del navegador.
+    # Solo se intenta una vez por conexión.
+    if (_sesion is None and "sb_cliente" not in st.session_state
+            and not st.session_state.get("_cookie_revisada")):
+        st.session_state["_cookie_revisada"] = True
+        _token = sesion_cookie.leer()
+        if _token:
+            _cliente = db_supabase.crear_cliente(_url, _key)
+            _sesion = db_supabase.restaurar_sesion(_cliente, _token)
+            if _sesion is not None:
+                st.session_state["sb_cliente"] = _cliente
+                st.session_state["sb_repo"] = db_supabase.RepoSupabase(_cliente, _sesion.user.id)
+            else:
+                st.session_state["_borrar_cookie"] = True   # token vencido o revocado
     if _sesion is None:
         if "sb_cliente" in st.session_state:
-            st.session_state.clear()   # la sesión venció o se cerró: no se arrastra nada
+            _limpiar_estado()   # la sesión venció o se cerró: no se arrastra nada
+        if st.session_state.pop("_borrar_cookie", False):
+            sesion_cookie.borrar()
         _pantalla_acceso(_url, _key)
         st.stop()
     email_sesion = _sesion.user.email
+    # Supabase rota el token de renovación: se guarda el vigente en la cookie
+    if st.session_state.get("_rt_cookie") != _sesion.refresh_token:
+        sesion_cookie.guardar(_sesion.refresh_token)
+        st.session_state["_rt_cookie"] = _sesion.refresh_token
 
 # Perfil guardado (nombre y meta de peso): se carga una sola vez por sesión
 if "_perfil_cargado" not in st.session_state:
